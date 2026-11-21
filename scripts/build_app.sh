@@ -4,7 +4,10 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-APP_DIR="$PROJECT_DIR/build/TrinityBar.app"
+VERSION="1.1.0"
+BUILD_NUMBER="2"
+DIST_DIR="$PROJECT_DIR/dist"
+APP_DIR="$DIST_DIR/TrinityBar.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -57,7 +60,7 @@ if [[ ! -f "$ICON_SRC" ]]; then
 fi
 cp "$ICON_SRC" "$RESOURCES_DIR/AppIcon.icns"
 
-cat > "$CONTENTS_DIR/Info.plist" <<'EOF'
+cat > "$CONTENTS_DIR/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -81,9 +84,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.0</string>
+    <string>$VERSION</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>$BUILD_NUMBER</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
     <key>LSUIElement</key>
@@ -102,3 +105,12 @@ touch "$APP_DIR"
 codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
 
 echo "Packaged successfully at: $APP_DIR"
+
+if [[ "${1:-}" == "--release" ]]; then
+    ARCHIVE_NAME="TrinityBar-v${VERSION}-macos-arm64.zip"
+    ARCHIVE_PATH="$DIST_DIR/$ARCHIVE_NAME"
+    rm -f "$ARCHIVE_PATH" "$ARCHIVE_PATH.sha256"
+    ditto -c -k --keepParent "$APP_DIR" "$ARCHIVE_PATH"
+    (cd "$DIST_DIR" && shasum -a 256 "$ARCHIVE_NAME" > "${ARCHIVE_NAME}.sha256")
+    echo "Release archive created at: $ARCHIVE_PATH"
+fi

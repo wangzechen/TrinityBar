@@ -10,9 +10,9 @@
 **TrinityBar** is a lightweight (`~640 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and live `Reduce Transparency` fallbacks).
 
 <p align="center">
-  <img src="assets/preview.png" width="382" valign="top" alt="TrinityBar Summary Dashboard" />
+  <img src="assets/dashboard-summary.png" width="382" valign="top" alt="TrinityBar Summary Dashboard" />
   &nbsp;&nbsp;
-  <img src="assets/preview-settings.png" width="382" valign="top" alt="TrinityBar Expanded Settings" />
+  <img src="assets/dashboard-settings.png" width="382" valign="top" alt="TrinityBar Expanded Settings" />
 </p>
 
 ---
@@ -84,7 +84,7 @@ Requires Xcode Command Line Tools (`xcode-select --install`):
 git clone https://github.com/wangzechen/TrinityBar.git
 cd TrinityBar
 ./scripts/build_app.sh
-cp -R build/TrinityBar.app /Applications/
+cp -R dist/TrinityBar.app /Applications/
 open /Applications/TrinityBar.app
 ```
 
@@ -119,10 +119,10 @@ TrinityBar/
 ├── README.md                                # Product overview, usage & build guide
 ├── ARCHITECTURE.md                          # System design, rendering mechanics & extension guide
 ├── assets/
-│   ├── preview.png                          # Collapsed summary dashboard screenshot
-│   └── preview-settings.png                 # Expanded settings drawer screenshot
+│   ├── dashboard-summary.png                # Collapsed summary dashboard screenshot
+│   └── dashboard-settings.png               # Expanded settings drawer screenshot
 ├── scripts/
-│   ├── build_app.sh                         # Size-optimized swiftc bundler -> build/TrinityBar.app (v1.1.0)
+│   ├── build_app.sh                         # Size-optimized swiftc bundler -> dist/TrinityBar.app (v1.1.0)
 │   └── generate_icon.swift                  # Deterministic 66 KB 1024x1024 AppIcon.icns generator
 └── Sources/TrinityBar/
     ├── TrinityBarApp.swift                  # NSStatusItem split-layer host, icon gestures, Combine sync & lifecycle
