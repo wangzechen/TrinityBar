@@ -10,7 +10,9 @@
 **TrinityBar** is a lightweight (`~588 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and `Reduce Transparency` fallbacks).
 
 <p align="center">
-  <img src="assets/preview.png" width="382" alt="TrinityBar Dashboard Preview" />
+  <img src="assets/preview.png" width="382" valign="top" alt="TrinityBar Summary Dashboard" />
+  &nbsp;&nbsp;
+  <img src="assets/preview-settings.png" width="382" valign="top" alt="TrinityBar Expanded Settings" />
 </p>
 
 ---
@@ -114,7 +116,8 @@ TrinityBar/
 ├── README.md                                # Product overview, usage & build guide
 ├── ARCHITECTURE.md                          # System design, rendering mechanics & extension guide
 ├── assets/
-│   └── preview.png                          # Dashboard preview screenshot
+│   ├── preview.png                          # Collapsed summary dashboard screenshot
+│   └── preview-settings.png                 # Expanded settings drawer screenshot
 ├── scripts/
 │   ├── build_app.sh                         # Size-optimized swiftc bundler -> build/TrinityBar.app (v1.0.0)
 │   └── generate_icon.swift                  # Deterministic 66 KB 1024x1024 AppIcon.icns generator
