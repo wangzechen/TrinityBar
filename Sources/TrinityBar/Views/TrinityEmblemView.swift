@@ -4,6 +4,7 @@ import CoreText
 import SwiftUI
 
 struct TrinityEmblemState: Equatable, Hashable {
+    var hasBattery: Bool
     var batteryPercent: Int
     var isCharging: Bool
     var isPluggedIn: Bool
@@ -17,6 +18,7 @@ struct TrinityEmblemState: Equatable, Hashable {
     var isDarkMenuBar: Bool
 
     init(
+        hasBattery: Bool = true,
         batteryPercent: Int,
         isCharging: Bool,
         isPluggedIn: Bool,
@@ -29,6 +31,7 @@ struct TrinityEmblemState: Equatable, Hashable {
         bottomProgress: Double,
         isDarkMenuBar: Bool
     ) {
+        self.hasBattery = hasBattery
         self.batteryPercent = batteryPercent
         self.isCharging = isCharging
         self.isPluggedIn = isPluggedIn
@@ -110,7 +113,7 @@ enum TrinityStatusIconRenderer {
         let baseImage = NSImage(cgImage: templateCG, size: NSSize(width: size, height: size))
         baseImage.isTemplate = true
 
-        let hasChromatic = isRingChromatic(state) || state.isCharging
+        let hasChromatic = isRingChromatic(state)
         let overlayCG: CGImage? = hasChromatic
             ? renderCGImage(
                 state: state,
@@ -147,7 +150,8 @@ enum TrinityStatusIconRenderer {
     }
 
     private static func isRingChromatic(_ state: TrinityEmblemState) -> Bool {
-        state.batteryPercent < 20 || state.isLowPowerMode || state.isCharging || state.isPluggedIn
+        guard state.hasBattery else { return false }
+        return state.batteryPercent < 20 || state.isLowPowerMode || state.isCharging || state.isPluggedIn
     }
 
     private static func resolvedPalette(isDark: Bool, appearance: NSAppearance?) -> (
@@ -252,14 +256,14 @@ enum TrinityStatusIconRenderer {
         lowPowerColor: CGColor,
         criticalColor: CGColor
     ) {
-        let hasTopGap = state.isCharging || state.isPluggedIn || state.showTopPercentage
+        let hasTopGap = !state.hasBattery || state.isCharging || state.isPluggedIn || state.showTopPercentage
         let halfGapDeg: CGFloat = {
-            if state.isCharging || state.isPluggedIn {
+            if !state.hasBattery || state.isCharging || state.isPluggedIn {
                 return symbolCrownHalfGapDeg
             }
             return state.batteryPercent >= 100 ? threeDigitCrownHalfGapDeg : twoDigitCrownHalfGapDeg
         }()
-        let pct = Double(min(100, max(0, state.batteryPercent))) / 100.0
+        let pct = state.hasBattery ? Double(min(100, max(0, state.batteryPercent))) / 100.0 : 0.0
 
         let ringIsColor = isRingChromatic(state)
         let ringFillColor: CGColor = {
@@ -278,9 +282,11 @@ enum TrinityStatusIconRenderer {
         }
 
         // 1b. Battery Ring Active Fill
-        let drawRingFill = (pass == .full)
+        let drawRingFill = state.hasBattery && (
+            (pass == .full)
             || (pass == .templateOnly && !ringIsColor)
             || (pass == .chromaticOnly && ringIsColor)
+        )
         if drawRingFill, pct > 0.0 {
             ctx.setLineWidth(ringStrokeWidth)
             ctx.setStrokeColor(ringFillColor)
@@ -288,11 +294,8 @@ enum TrinityStatusIconRenderer {
             ctx.strokePath()
         }
 
-        // 2. Top Crown Accessory (Charging Bolt / AC Plug / Percentage Digits)
-        let accessoryIsColor = state.isCharging
-        let drawAccessory = (pass == .full)
-            || (pass == .templateOnly && !accessoryIsColor)
-            || (pass == .chromaticOnly && accessoryIsColor)
+        // 2. Top Crown Accessory (Charging Bolt / AC Plug / Percentage Digits — template layer for vibrancy)
+        let drawAccessory = (pass == .full) || (pass == .templateOnly)
 
         if drawAccessory, hasTopGap {
             ctx.saveGState()
@@ -304,7 +307,7 @@ enum TrinityStatusIconRenderer {
                 )
             }
 
-            if state.isCharging {
+            if state.hasBattery && state.isCharging {
                 drawSymbol(
                     name: "bolt.fill",
                     variableValue: 1.0,
@@ -314,7 +317,7 @@ enum TrinityStatusIconRenderer {
                     foreground: foreground,
                     in: ctx
                 )
-            } else if state.isPluggedIn {
+            } else if !state.hasBattery || state.isPluggedIn {
                 let plugName = NSImage(systemSymbolName: "powerplug.portrait.fill", accessibilityDescription: nil) != nil
                     ? "powerplug.portrait.fill"
                     : "powerplug.fill"

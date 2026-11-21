@@ -43,15 +43,29 @@ final class BatteryMonitor: ObservableObject {
     @Published private(set) var highEnergyApps: [EnergyAppItem] = []
     @Published private(set) var isSamplingEnergyApps: Bool = false
 
-    private struct RawAppCounter {
+    private struct RawAppCounter: Sendable {
         let cpuNs: UInt64
         let energyNj: UInt64
+    }
+
+    private struct SMCSensorSnapshot: Sendable {
+        let systemLoadWatts: Double?
+        let adapterInputWatts: Double?
+        let displayWatts: Double?
+        let usbOutputWatts: Double?
+        let batteryVoltageVolts: Double?
+        let batteryAmperageMA: Int?
+        let batteryWattage: Double?
     }
 
     nonisolated(unsafe) private var runLoopSource: CFRunLoopSource?
     nonisolated(unsafe) private var powerStateObserver: NSObjectProtocol?
     nonisolated(unsafe) private var refreshTimer: Timer?
     nonisolated(unsafe) private var popoverTimer: Timer?
+    nonisolated(unsafe) private var smcTask: Task<Void, Never>?
+    nonisolated(unsafe) private var energyAppsTask: Task<Void, Never>?
+    private var isPopoverVisible: Bool = false
+    private var energySampleGeneration: UInt64 = 0
     private var lastAppSampleTime: TimeInterval?
     private var lastAppCounters: [String: RawAppCounter] = [:]
 
@@ -61,6 +75,8 @@ final class BatteryMonitor: ObservableObject {
     }
 
     deinit {
+        smcTask?.cancel()
+        energyAppsTask?.cancel()
         popoverTimer?.invalidate()
         refreshTimer?.invalidate()
         if let powerStateObserver {
@@ -72,12 +88,20 @@ final class BatteryMonitor: ObservableObject {
     }
 
     func setPopoverVisible(_ visible: Bool) {
+        isPopoverVisible = visible
         popoverTimer?.invalidate()
         popoverTimer = nil
 
         guard visible else {
+            energySampleGeneration &+= 1
+            smcTask?.cancel()
+            smcTask = nil
+            energyAppsTask?.cancel()
+            energyAppsTask = nil
             lastAppSampleTime = nil
             lastAppCounters.removeAll()
+            highEnergyApps = []
+            isSamplingEnergyApps = false
             return
         }
 
@@ -144,6 +168,15 @@ final class BatteryMonitor: ObservableObject {
             percentage = 100
             isCharging = false
             isPluggedIn = true
+            timeRemainingMinutes = nil
+            wattage = nil
+            healthPercent = nil
+            cycleCount = nil
+            temperatureCelsius = nil
+            voltageVolts = nil
+            amperageMA = nil
+            designCapacityMAh = nil
+            maxCapacityMAh = nil
             if includeDetailedSensors || popoverTimer != nil {
                 readSMCSensors()
             }
@@ -242,12 +275,43 @@ final class BatteryMonitor: ObservableObject {
     // MARK: - Read-Only AppleSMC Power Sensors
 
     private func readSMCSensors() {
+        smcTask?.cancel()
+        let pluggedIn = isPluggedIn
+        smcTask = Task { @MainActor [weak self] in
+            let snapshot = await Task.detached(priority: .utility) {
+                Self.readSMCSensorsSnapshot(isPluggedIn: pluggedIn)
+            }.value
+            guard !Task.isCancelled, let self, let snapshot else { return }
+            self.applySMCSnapshot(snapshot)
+            self.smcTask = nil
+        }
+    }
+
+    private func applySMCSnapshot(_ snapshot: SMCSensorSnapshot) {
+        if let pstr = snapshot.systemLoadWatts {
+            systemLoadWatts = pstr
+        }
+        adapterInputWatts = isPluggedIn ? snapshot.adapterInputWatts : nil
+        displayWatts = snapshot.displayWatts
+        usbOutputWatts = snapshot.usbOutputWatts
+
+        if hasBattery,
+           let bv = snapshot.batteryVoltageVolts,
+           let ba = snapshot.batteryAmperageMA,
+           let w = snapshot.batteryWattage {
+            voltageVolts = bv
+            amperageMA = ba
+            wattage = w
+        }
+    }
+
+    nonisolated private static func readSMCSensorsSnapshot(isPluggedIn: Bool) -> SMCSensorSnapshot? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"))
-        guard service != 0 else { return }
+        guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }
 
         var conn: io_connect_t = 0
-        guard IOServiceOpen(service, mach_task_self_, 0, &conn) == KERN_SUCCESS else { return }
+        guard IOServiceOpen(service, mach_task_self_, 0, &conn) == KERN_SUCCESS else { return nil }
         defer { IOServiceClose(conn) }
 
         let exchange: ([UInt8]) -> [UInt8]? = { req in
@@ -261,21 +325,27 @@ final class BatteryMonitor: ObservableObject {
             return (kr == KERN_SUCCESS && size == 80) ? resp : nil
         }
 
-        if let pstr = Self.readSMCScalar(key: 0x50535452, exchange: exchange), pstr > 0, pstr <= 500 {
-            systemLoadWatts = pstr
-        }
-        if isPluggedIn, let pdtr = Self.readSMCScalar(key: 0x50445452, exchange: exchange), pdtr >= 0, pdtr <= 500 {
-            adapterInputWatts = pdtr
+        let pstrVal: Double?
+        if let pstr = readSMCScalar(key: 0x50535452, exchange: exchange), pstr > 0, pstr <= 500 {
+            pstrVal = pstr
         } else {
-            adapterInputWatts = nil
+            pstrVal = nil
         }
 
-        if let pdbr = Self.readSMCScalar(key: 0x50444252, exchange: exchange), pdbr >= 0, pdbr <= 120 {
-            displayWatts = pdbr
-        } else if let pblr = Self.readSMCScalar(key: 0x50424C52, exchange: exchange), pblr >= 0, pblr <= 120 {
-            displayWatts = pblr
+        let pdtrVal: Double?
+        if isPluggedIn, let pdtr = readSMCScalar(key: 0x50445452, exchange: exchange), pdtr >= 0, pdtr <= 500 {
+            pdtrVal = pdtr
         } else {
-            displayWatts = nil
+            pdtrVal = nil
+        }
+
+        let dispVal: Double?
+        if let pdbr = readSMCScalar(key: 0x50444252, exchange: exchange), pdbr >= 0, pdbr <= 120 {
+            dispVal = pdbr
+        } else if let pblr = readSMCScalar(key: 0x50424C52, exchange: exchange), pblr >= 0, pblr <= 120 {
+            dispVal = pblr
+        } else {
+            dispVal = nil
         }
 
         var portTotal: Double = 0
@@ -283,8 +353,8 @@ final class BatteryMonitor: ObservableObject {
         for ch in 1...4 {
             let vKey = (UInt32(0x44) << 24) | (UInt32(0x30 + ch) << 16) | 0x4A56 // DnJV
             let iKey = (UInt32(0x44) << 24) | (UInt32(0x30 + ch) << 16) | 0x4A49 // DnJI
-            if let v = Self.readSMCScalar(key: vKey, exchange: exchange),
-               let a = Self.readSMCScalar(key: iKey, exchange: exchange) {
+            if let v = readSMCScalar(key: vKey, exchange: exchange),
+               let a = readSMCScalar(key: iKey, exchange: exchange) {
                 let w = v * a
                 if w.isFinite, w > 0.05, w <= 150 {
                     portTotal += w
@@ -292,23 +362,34 @@ final class BatteryMonitor: ObservableObject {
                 }
             }
         }
-        usbOutputWatts = portFound ? portTotal : nil
 
-        // Live SMC battery current/voltage override if available
-        if let bv = Self.readSMCIntegerSensor(key: 0x42304156, signed: false, exchange: exchange),
-           let ba = Self.readSMCIntegerSensor(key: 0x42304143, signed: true, exchange: exchange),
+        var bvOut: Double?
+        var baOut: Int?
+        var wOut: Double?
+        if let bv = readSMCIntegerSensor(key: 0x42304156, signed: false, exchange: exchange),
+           let ba = readSMCIntegerSensor(key: 0x42304143, signed: true, exchange: exchange),
            (3.0...25.0).contains(bv), abs(ba) <= 25.0 {
-            voltageVolts = bv
-            amperageMA = Int(round(ba * 1000.0))
-            wattage = bv * ba
+            bvOut = bv
+            baOut = Int(round(ba * 1000.0))
+            wOut = bv * ba
         }
+
+        return SMCSensorSnapshot(
+            systemLoadWatts: pstrVal,
+            adapterInputWatts: pdtrVal,
+            displayWatts: dispVal,
+            usbOutputWatts: portFound ? portTotal : nil,
+            batteryVoltageVolts: bvOut,
+            batteryAmperageMA: baOut,
+            batteryWattage: wOut
+        )
     }
 
-    private static func leUInt32(_ b: [UInt8], _ off: Int) -> UInt32 {
+    nonisolated private static func leUInt32(_ b: [UInt8], _ off: Int) -> UInt32 {
         UInt32(b[off]) | (UInt32(b[off + 1]) << 8) | (UInt32(b[off + 2]) << 16) | (UInt32(b[off + 3]) << 24)
     }
 
-    private static func readSMCScalar(key: UInt32, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
+    nonisolated private static func readSMCScalar(key: UInt32, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
         var req = [UInt8](repeating: 0, count: 80)
         for i in 0..<4 { req[i] = UInt8(truncatingIfNeeded: key >> (i * 8)) }
         req[42] = 9 // read key info
@@ -332,7 +413,7 @@ final class BatteryMonitor: ObservableObject {
         return val.isFinite ? val : nil
     }
 
-    private static func readSMCIntegerSensor(key: UInt32, signed: Bool, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
+    nonisolated private static func readSMCIntegerSensor(key: UInt32, signed: Bool, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
         var req = [UInt8](repeating: 0, count: 80)
         for i in 0..<4 { req[i] = UInt8(truncatingIfNeeded: key >> (i * 8)) }
         req[42] = 9
@@ -351,42 +432,122 @@ final class BatteryMonitor: ObservableObject {
     // MARK: - High Energy Apps Sampling (proc_pid_rusage RUSAGE_INFO_V6)
 
     private func sampleEnergyApps() {
+        guard energyAppsTask == nil else { return }
+
         let myBundlePath = Bundle.main.bundleURL.standardizedFileURL.path
-        let runningApps = NSWorkspace.shared.runningApplications.compactMap { app -> (path: String, name: String, icon: NSImage?)? in
+        var appLookup: [String: (name: String, icon: NSImage?)] = [:]
+        var appPaths: [String] = []
+        for app in NSWorkspace.shared.runningApplications {
             guard app.activationPolicy == .regular || app.activationPolicy == .accessory,
-                  let url = app.bundleURL else { return nil }
+                  let url = app.bundleURL else { continue }
             let path = url.standardizedFileURL.path
-            guard path != myBundlePath, path.hasSuffix(".app") else { return nil }
+            guard path != myBundlePath, path.hasSuffix(".app") else { continue }
             // Exclude headless macOS system agents (e.g. MenuBarAgent, ControlCenter, WindowManager)
             // while preserving user-facing regular apps (including Finder / System Settings).
             if app.activationPolicy != .regular && path.hasPrefix("/System/Library/") {
-                return nil
+                continue
             }
-            let name = app.localizedName ?? url.deletingPathExtension().lastPathComponent
-            return (path, name, app.icon)
+            if appLookup[path] == nil {
+                let name = app.localizedName ?? url.deletingPathExtension().lastPathComponent
+                appLookup[path] = (name, app.icon)
+                appPaths.append(path)
+            }
         }
-        guard !runningApps.isEmpty else { return }
+        guard !appPaths.isEmpty else { return }
 
+        if lastAppSampleTime == nil {
+            isSamplingEnergyApps = true
+        }
+
+        // Sort shortest-first so the first prefix match is always the outer .app bundle
+        let sortedPaths = appPaths.sorted { $0.count < $1.count }
+        energySampleGeneration &+= 1
+        let generation = energySampleGeneration
+
+        energyAppsTask = Task { @MainActor [weak self] in
+            let sample = await Task.detached(priority: .utility) {
+                Self.collectAppCounters(sortedAppPaths: sortedPaths)
+            }.value
+            guard let self, self.energySampleGeneration == generation else { return }
+            self.energyAppsTask = nil
+            guard !Task.isCancelled, self.isPopoverVisible, let sample else { return }
+
+            let (currentCounters, now) = sample
+            if let prevTime = self.lastAppSampleTime {
+                let dt = max(0.4, now - prevTime)
+                var items: [EnergyAppItem] = []
+
+                for (path, cur) in currentCounters {
+                    guard let prev = self.lastAppCounters[path], let info = appLookup[path] else { continue }
+                    let dEnergy = cur.energyNj >= prev.energyNj ? Double(cur.energyNj - prev.energyNj) : 0
+                    let dCpu = cur.cpuNs >= prev.cpuNs ? Double(cur.cpuNs - prev.cpuNs) : 0
+
+                    if dEnergy > 0 {
+                        let watts = (dEnergy / 1_000_000_000.0) / dt
+                        if watts >= 0.05 {
+                            items.append(EnergyAppItem(
+                                id: path,
+                                name: info.name,
+                                icon: info.icon,
+                                powerText: String(format: "%.2f W", watts),
+                                score: watts * 100.0
+                            ))
+                        }
+                    } else if dCpu > 0 {
+                        let cpuPct = (dCpu / 1_000_000_000.0) / dt * 100.0
+                        if cpuPct >= 0.5 {
+                            items.append(EnergyAppItem(
+                                id: path,
+                                name: info.name,
+                                icon: info.icon,
+                                powerText: String(format: "%.1f%% CPU", cpuPct),
+                                score: cpuPct
+                            ))
+                        }
+                    }
+                }
+                items.sort { $0.score > $1.score }
+                self.highEnergyApps = Array(items.prefix(5))
+                self.isSamplingEnergyApps = false
+            }
+
+            self.lastAppCounters = currentCounters
+            self.lastAppSampleTime = now
+        }
+    }
+
+    nonisolated private static let machTimebaseNanosPerTick: Double = {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        guard info.denom > 0 else { return 1.0 }
+        return Double(info.numer) / Double(info.denom)
+    }()
+
+    nonisolated private static func collectAppCounters(
+        sortedAppPaths: [String]
+    ) -> (counters: [String: RawAppCounter], timestamp: TimeInterval)? {
         let now = ProcessInfo.processInfo.systemUptime
         let byteCount = proc_listpids(UInt32(PROC_UID_ONLY), getuid(), nil, 0)
-        guard byteCount > 0 else { return }
+        guard byteCount > 0 else { return nil }
         let cap = min(Int(byteCount) / MemoryLayout<pid_t>.stride + 64, 8192)
         var pids = [pid_t](repeating: 0, count: cap)
         let returned = pids.withUnsafeMutableBytes {
             proc_listpids(UInt32(PROC_UID_ONLY), getuid(), $0.baseAddress, Int32($0.count))
         }
+        guard returned > 0 else { return nil }
         let pidCount = max(0, min(Int(returned) / MemoryLayout<pid_t>.stride, cap))
 
+        let pathPrefixes = sortedAppPaths.map { (path: $0, prefix: $0 + "/") }
+        let nsPerTick = machTimebaseNanosPerTick
         var currentCounters: [String: RawAppCounter] = [:]
         var pathBuf = [CChar](repeating: 0, count: 4096)
 
         for pid in pids.prefix(pidCount) where pid > 0 {
             guard proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count)) > 0 else { continue }
             let execPath = String(decoding: pathBuf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-            guard let matched = runningApps
-                .filter({ execPath.hasPrefix($0.path + "/") })
-                .min(by: { $0.path.count < $1.path.count })
-            else { continue }
+            guard let matchedPath = pathPrefixes.first(where: { execPath.hasPrefix($0.prefix) })?.path else {
+                continue
+            }
 
             var usage = rusage_info_v6()
             let kr = withUnsafeMutablePointer(to: &usage) { ptr in
@@ -395,58 +556,16 @@ final class BatteryMonitor: ObservableObject {
                 }
             }
             guard kr == 0 else { continue }
-            let cpu = usage.ri_user_time &+ usage.ri_system_time
+            let cpuTicks = usage.ri_user_time &+ usage.ri_system_time
+            let cpuNs = UInt64(Double(cpuTicks) * nsPerTick)
             let energy = usage.ri_energy_nj
-            let prev = currentCounters[matched.path] ?? RawAppCounter(cpuNs: 0, energyNj: 0)
-            currentCounters[matched.path] = RawAppCounter(
-                cpuNs: prev.cpuNs &+ cpu,
+            let prev = currentCounters[matchedPath] ?? RawAppCounter(cpuNs: 0, energyNj: 0)
+            currentCounters[matchedPath] = RawAppCounter(
+                cpuNs: prev.cpuNs &+ cpuNs,
                 energyNj: prev.energyNj &+ energy
             )
         }
 
-        if let prevTime = lastAppSampleTime {
-            let dt = max(0.4, now - prevTime)
-            var items: [EnergyAppItem] = []
-            var appLookup: [String: (name: String, icon: NSImage?)] = [:]
-            for a in runningApps { appLookup[a.path] = (a.name, a.icon) }
-
-            for (path, cur) in currentCounters {
-                guard let prev = lastAppCounters[path], let info = appLookup[path] else { continue }
-                let dEnergy = cur.energyNj >= prev.energyNj ? Double(cur.energyNj - prev.energyNj) : 0
-                let dCpu = cur.cpuNs >= prev.cpuNs ? Double(cur.cpuNs - prev.cpuNs) : 0
-
-                if dEnergy > 0 {
-                    let watts = (dEnergy / 1_000_000_000.0) / dt
-                    if watts >= 0.05 {
-                        items.append(EnergyAppItem(
-                            id: path,
-                            name: info.name,
-                            icon: info.icon,
-                            powerText: String(format: "%.2f W", watts),
-                            score: watts * 100.0
-                        ))
-                    }
-                } else if dCpu > 0 {
-                    let cpuPct = (dCpu / 1_000_000_000.0) / dt * 100.0
-                    if cpuPct >= 0.5 {
-                        items.append(EnergyAppItem(
-                            id: path,
-                            name: info.name,
-                            icon: info.icon,
-                            powerText: String(format: "%.1f%% CPU", cpuPct),
-                            score: cpuPct
-                        ))
-                    }
-                }
-            }
-            items.sort { $0.score > $1.score }
-            highEnergyApps = Array(items.prefix(5))
-            isSamplingEnergyApps = false
-        } else {
-            isSamplingEnergyApps = true
-        }
-
-        lastAppCounters = currentCounters
-        lastAppSampleTime = now
+        return (currentCounters, now)
     }
 }

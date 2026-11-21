@@ -10,7 +10,7 @@ This document describes **TrinityBar**'s internal architecture, hardware telemet
 flowchart TD
     subgraph SystemAPIs["macOS System & Hardware Frameworks"]
         SMC["IOKit / AppleSmartBattery / AppleSMC / proc_pid_rusage"]
-        NET["NWPathMonitor / CoreWLAN / CoreLocation / SCDynamicStore / getifaddrs"]
+        NET["NWPathMonitor / CoreWLAN / CoreLocation / SCDynamicStore / sysctl (NET_RT_IFLIST2)"]
         AUD["CoreAudio / AudioToolbox (AudioHardwareService)"]
         PM["IOKit Power Management (IOPMAssertion)"]
         CC["CFPreferences (com.apple.controlcenter)"]
@@ -82,23 +82,25 @@ Animating height changes (`Settings` expand/collapse or `Summary <-> Detail` pag
 All monitors are `@MainActor ObservableObject` classes designed to keep idle background CPU near `0%` by gating active polling behind `setPopoverVisible(_ visible: Bool)`:
 
 - **`BatteryMonitor.swift`**:
-  - **Background**: Event-driven `IOPSNotificationCreateRunLoopSource` + `NSProcessInfoPowerStateDidChange` + `30s` fallback timer reading `IOPSCopyPowerSourcesInfo` and `AppleSmartBattery` IORegistry properties.
-  - **Popover Open (`2s` timer)**: Reads read-only `AppleSMC` FourCC power keys (`PSTR` system load, `PDTR` adapter input, `PHPC` CPU/GPU package, `PDBR` display brightness power) for the Sankey Power Flow diagram, and samples per-app `proc_pid_rusage` (`RUSAGE_INFO_V6` `ri_energy_nj` / CPU deltas), excluding headless `/System/Library/` OS daemons (such as `MenuBarAgent`) so only genuine user apps appear under **High Energy Apps**.
+  - **Background**: Event-driven `IOPSNotificationCreateRunLoopSource` + `NSProcessInfoPowerStateDidChange` + `30s` fallback timer reading `IOPSCopyPowerSourcesInfo` and `AppleSmartBattery` IORegistry properties (including desktop Mac `hasBattery == false` AC-only handling).
+  - **Popover Open (`2s` timer)**: Offloads read-only `AppleSMC` FourCC power keys (`PSTR`, `PDTR`, `PDBR`/`PBLR`, `DnJV`/`DnJI`) and per-app `proc_pid_rusage` (`RUSAGE_INFO_V6` `ri_energy_nj` / `mach_timebase_info`-scaled CPU deltas) onto `Task.detached(priority: .utility)` so the main thread never stalls, excluding headless `/System/Library/` OS daemons and cancelling in-flight tasks when the panel closes.
 - **`NetworkMonitor.swift`**:
   - **Background**: Event-driven `NWPathMonitor`, `CoreWLAN` (`CWWiFiClient`), and `SCDynamicStore` (`State:/Network/Global/IPv4`, `DNS`) callbacks.
-  - **Popover Open**: `1s` `getifaddrs` (`ifa_data` `ifi_ibytes` / `ifi_obytes`) throughput delta sampler, `3s` non-blocking TCP `NWConnection` latency probe, and async `CWInterface.scanForNetworks(withName:)` Wi-Fi scanner.
+  - **Popover Open**: `1.5s` 64-bit `sysctl` (`NET_RT_IFLIST2` / `RTM_IFINFO2` / `if_data64`) throughput delta sampler (avoiding 32-bit 4 GiB wraparound), non-blocking TCP `NWConnection` latency probe, async `CWInterface.scanForNetworks(withSSID:)` scanner, and one-click `CWInterface.associate(to:password:nil)` switching for Known Networks.
 - **`AudioVolumeMonitor.swift`**:
   - **Purely Event-Driven**: Registers `AudioObjectAddPropertyListener` callbacks on `kAudioHardwarePropertyDefaultOutputDevice`, `kAudioHardwarePropertyDefaultInputDevice`, `kAudioHardwarePropertyDevices`, `kAudioHardwareServiceDeviceProperty_VirtualMainVolume`, and `kAudioDevicePropertyMute`.
   - **Loopback Driver Filtering**: Checks `kAudioDevicePropertyDeviceCanBeDefaultDevice == 1` in the target scope — matching macOS **System Settings → Sound** so internal virtual loopback drivers (e.g., `Microsoft Teams Audio` / `MSLoopbackDriverDevice_UID`) are excluded while physical, Bluetooth, USB, HDMI, and AirPlay endpoints remain selectable.
-  - **Soft-Mute Fallback**: Devices without hardware `kAudioDevicePropertyMute` (common on Bluetooth headsets) transparently fall back to storing pre-mute volume and setting virtual main volume to `0.0`.
+  - **Soft-Mute Fallback**: Devices without settable hardware `kAudioDevicePropertyMute` (common on Bluetooth headsets) transparently fall back to storing pre-mute volume and setting virtual main volume to `0.0`.
+- **`CaffeinateManager.swift`**:
+  - Manages `kIOPMAssertionTypePreventUserIdleDisplaySleep` with persisted duration presets (`30m / 1h / 2h / ∞`) and a `.common`-mode countdown timer that releases the assertion on expiry or post-wake check.
 - **`SystemIconsManager.swift`**:
-  - Uses a table-driven `ManagedControlCenterItem` list (`WiFi`, `Battery`, `Sound`) to snapshot and manage `com.apple.controlcenter` preferences (`byHost` visibility integer + `NSStatusItem Visible <key>`).
-  - Coordinates automatically with `AppSettings.$bottomMode`: switching `Volume Bar` to `None` immediately surfaces the native macOS `Sound` status bar icon while keeping `WiFi` and `Battery` hidden; exiting TrinityBar (`Quit`, `⌘Q`, `SIGTERM`, `SIGINT`) restores all original snapshots.
+  - Uses a table-driven `ManagedControlCenterItem` list (`WiFi`, `Battery`, `Sound`) to snapshot and manage `com.apple.controlcenter` preferences (`byHost` visibility integer + `NSStatusItem Visible <key>`), persisting the user's `Hide Native Icons` preference across restarts with crash-recovery restoration.
+  - Coordinates automatically with `AppSettings.$bottomMode`: switching `Volume Bar` to `None` immediately surfaces the native macOS `Sound` status bar icon while keeping `WiFi` and `Battery` hidden; exiting TrinityBar (`Quit`, `⌘Q`, `SIGTERM`, `SIGINT`) flushes state and restores all original snapshots.
 
 ### 2.4 Build Pipeline & Bundle Size Optimization (`scripts/`)
-- **`scripts/build_app.sh`** compiles directly via `swiftc -Osize -whole-module-optimization -parse-as-library -strict-concurrency=complete -warnings-as-errors -Xlinker -dead_strip` followed by `strip -x`, producing a **`~520 KB`** arm64 executable without requiring external SwiftPM macro plugin binaries.
+- **`scripts/build_app.sh`** compiles directly via `swiftc -Osize -whole-module-optimization -parse-as-library -strict-concurrency=complete -warnings-as-errors -Xlinker -dead_strip` followed by `strip -x`, producing a **`~565 KB`** arm64 executable without requiring external SwiftPM macro plugin binaries.
   - **Important Constraint**: Do not introduce `@State` (which depends on the `SwiftUIMacros` compiler plugin) inside `View` structs; store transient navigation or disclosure flags as `@Published` properties on `AppSettings`.
-- **`scripts/generate_icon.swift`** renders a crisp `1024x1024` vector squircle icon and writes a single-chunk `ic10` PNG-backed `AppIcon.icns` (**`66 KB`**), keeping the entire packaged `TrinityBar.app` (`v1.0.0`) at **`~588 KB`**.
+- **`scripts/generate_icon.swift`** renders a crisp `1024x1024` vector squircle icon and writes a single-chunk `ic10` PNG-backed `AppIcon.icns` (**`66 KB`**), keeping the entire packaged `TrinityBar.app` (`v1.1.0`) at **`~640 KB`**.
 
 ---
 

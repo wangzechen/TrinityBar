@@ -40,6 +40,7 @@ struct PopoverDashboardView: View {
 
     private var emblemState: TrinityEmblemState {
         TrinityEmblemState(
+            hasBattery: battery.hasBattery,
             batteryPercent: battery.percentage,
             isCharging: battery.isCharging,
             isPluggedIn: battery.isPluggedIn,
@@ -128,7 +129,7 @@ struct PopoverDashboardView: View {
                 symbol: batterySymbolName,
                 symbolSize: 16,
                 accentColor: batteryAccentColor,
-                title: "Battery · \(battery.percentage)%",
+                title: battery.hasBattery ? "Battery · \(battery.percentage)%" : "Power · AC",
                 titleBadge: batteryWattageBadge,
                 subtitle: batterySubtitle,
                 detailsHelp: "Battery Power Flow & Details",
@@ -230,8 +231,9 @@ struct PopoverDashboardView: View {
                     HStack(spacing: 3) {
                         Image(systemName: "cup.and.saucer.fill")
                             .font(.system(size: 9.5, weight: .semibold))
-                        Text("Awake")
+                        Text(caffeinate.remainingBadgeText.map { "Awake · \($0)" } ?? "Awake")
                             .font(.system(size: 10, weight: .medium))
+                            .monospacedDigit()
                     }
                     .foregroundStyle(Color.orange)
                     .padding(.horizontal, 5)
@@ -288,6 +290,17 @@ struct PopoverDashboardView: View {
             }
 
             HStack {
+                Text("Icon Volume Control")
+                    .font(.system(size: 11.5))
+                Spacer()
+                Toggle("", isOn: $settings.iconVolumeControl)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .help("Scroll on the menu bar icon to adjust volume, and ⌥-Click to mute")
+            }
+
+            HStack {
                 Text("Hide Native Icons")
                     .font(.system(size: 11.5))
                 Spacer()
@@ -326,23 +339,57 @@ struct PopoverDashboardView: View {
 
             Divider().opacity(0.35)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Button {
                     caffeinate.toggle()
                 } label: {
                     HStack(spacing: 5) {
                         Image(systemName: caffeinate.isKeepingAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
                             .font(.system(size: 11, weight: .semibold))
-                        Text(caffeinate.isKeepingAwake ? "Awake On" : "Keep Awake")
+                        Text(keepAwakeButtonTitle)
                             .font(.system(size: 11.5, weight: .medium))
+                            .monospacedDigit()
+                            .lineLimit(1)
                     }
                     .foregroundStyle(caffeinate.isKeepingAwake ? Color.orange : .secondary)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .help("Prevent Mac display sleep")
 
+                Spacer(minLength: 4)
+
+                HStack(spacing: 3) {
+                    ForEach(CaffeinateDuration.allCases) { duration in
+                        let isSelected = caffeinate.selectedDuration == duration
+                        Button {
+                            caffeinate.activate(duration: duration)
+                        } label: {
+                            Text(duration.shortLabel)
+                                .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
+                                .foregroundStyle(
+                                    isSelected
+                                        ? (caffeinate.isKeepingAwake ? Color.orange : Color.primary)
+                                        : Color.secondary
+                                )
+                                .padding(.horizontal, 5.5)
+                                .padding(.vertical, 2.5)
+                                .background(
+                                    isSelected
+                                        ? (caffeinate.isKeepingAwake
+                                            ? Color.orange.opacity(0.18)
+                                            : Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09))
+                                        : Color.clear,
+                                    in: Capsule(style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            HStack {
                 Spacer()
-
                 Button {
                     NSApplication.shared.terminate(nil)
                 } label: {
@@ -368,12 +415,21 @@ struct PopoverDashboardView: View {
 
     // MARK: - Formatting Helpers
 
+    private var keepAwakeButtonTitle: String {
+        guard caffeinate.isKeepingAwake else { return "Keep Awake" }
+        if let rem = caffeinate.remainingBadgeText {
+            return "Awake · \(rem)"
+        }
+        return "Awake On"
+    }
+
     private var batteryWattageBadge: String? {
         guard let w = battery.wattage, abs(w) >= 0.15 else { return nil }
         return String(format: "%+.1fW", w)
     }
 
     private var batterySymbolName: String {
+        if !battery.hasBattery { return "powerplug.fill" }
         if battery.isCharging { return "battery.100percent.bolt" }
         if battery.percentage >= 88 { return "battery.100percent" }
         if battery.percentage >= 63 { return "battery.75percent" }
@@ -383,6 +439,7 @@ struct PopoverDashboardView: View {
     }
 
     private var batteryAccentColor: Color {
+        if !battery.hasBattery { return .primary }
         if battery.isCharging || battery.isPluggedIn { return .green }
         if battery.percentage <= 15 { return .red }
         if battery.isLowPowerMode || battery.percentage <= 20 { return .yellow }
@@ -390,6 +447,9 @@ struct PopoverDashboardView: View {
     }
 
     private var batterySubtitle: String {
+        if !battery.hasBattery {
+            return battery.isLowPowerMode ? "AC Power · Low Power Mode" : "Desktop AC Power"
+        }
         var parts: [String] = []
         if let mins = battery.timeRemainingMinutes {
             let h = mins / 60
@@ -448,7 +508,7 @@ struct PopoverDashboardView: View {
     }
 
     private var networkSubtitle: String {
-        if network.kind == .offline {
+        if network.kind == .offline || (network.kind == .wifi && !network.wifiPowerOn) {
             return network.wifiPowerOn ? "Not connected" : "Radio powered off"
         }
         var parts: [String] = []
@@ -457,11 +517,11 @@ struct PopoverDashboardView: View {
         } else {
             parts.append(network.interfaceName)
         }
-        if let phy = network.phyMode, !phy.isEmpty {
+        if network.kind == .wifi, let phy = network.phyMode, !phy.isEmpty {
             parts.append(phy)
-        } else if let rate = network.linkRateMbps, rate > 0 {
+        } else if network.kind == .wifi, let rate = network.linkRateMbps, rate > 0 {
             parts.append("\(Int(round(rate))) Mbps")
-        } else {
+        } else if !parts.contains(network.interfaceName) {
             parts.append(network.interfaceName)
         }
         return parts.joined(separator: " · ")

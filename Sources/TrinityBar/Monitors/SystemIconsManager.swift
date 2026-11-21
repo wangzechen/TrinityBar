@@ -59,9 +59,12 @@ final class SystemIconsManager: ObservableObject {
 
     init() {
         let ud = UserDefaults.standard
-        // Always default ON upon app launch; user can toggle anytime during the session.
-        self.autoHideEnabled = true
-        ud.set(true, forKey: Keys.autoHideEnabledV2)
+        if ud.object(forKey: Keys.autoHideEnabledV2) == nil {
+            self.autoHideEnabled = true
+            ud.set(true, forKey: Keys.autoHideEnabledV2)
+        } else {
+            self.autoHideEnabled = ud.bool(forKey: Keys.autoHideEnabledV2)
+        }
         self.isCurrentlyHiddenByApp = ud.bool(forKey: Keys.isCurrentlyHidden)
     }
 
@@ -78,11 +81,13 @@ final class SystemIconsManager: ObservableObject {
     func applyOnLaunchIfNeeded() {
         if autoHideEnabled || !includesVolumeInEmblem {
             applyCurrentPolicy()
+        } else if isCurrentlyHiddenByApp {
+            restoreSystemIcons()
         }
     }
 
     func restoreOnTerminateIfNeeded() {
-        guard autoHideEnabled || isCurrentlyHiddenByApp else { return }
+        guard isCurrentlyHiddenByApp else { return }
         restoreSystemIcons()
     }
 
@@ -131,6 +136,7 @@ final class SystemIconsManager: ObservableObject {
         syncPreferences()
         isCurrentlyHiddenByApp = false
         ud.set(false, forKey: Keys.isCurrentlyHidden)
+        ud.synchronize()
         restartControlCenter()
     }
 

@@ -19,10 +19,15 @@ final class StatusFloatingPanel: NSPanel {
     var allowsScrollVolume: (() -> Bool)?
 
     private static let permanentHostingCanvasHeight: CGFloat = 1600
+    private let rootContainer: NSView
+    private let topPinnedContainer: TopPinnedContainerView
+    private var backdropView: NSView?
+    private var currentReduceTransparency: Bool = false
+    nonisolated(unsafe) private var accessibilityObserver: NSObjectProtocol?
     private var hostingView: NSView?
-    private var globalClickMonitor: Any?
-    private var localKeyMonitor: Any?
-    private var localScrollMonitor: Any?
+    nonisolated(unsafe) private var globalClickMonitor: Any?
+    nonisolated(unsafe) private var localKeyMonitor: Any?
+    nonisolated(unsafe) private var localScrollMonitor: Any?
     private var anchorButtonScreenRect: NSRect = .zero
     private var lastCloseTimestamp: TimeInterval = 0
 
@@ -31,8 +36,12 @@ final class StatusFloatingPanel: NSPanel {
     }
 
     init<Content: View>(rootView: Content) {
+        let initialBounds = NSRect(x: 0, y: 0, width: 332, height: 300)
+        self.rootContainer = NSView(frame: initialBounds)
+        self.topPinnedContainer = TopPinnedContainerView(frame: initialBounds)
+
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 332, height: 300),
+            contentRect: initialBounds,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -49,24 +58,75 @@ final class StatusFloatingPanel: NSPanel {
         animationBehavior = .utilityWindow
         isMovable = false
         isMovableByWindowBackground = false
+        title = "TrinityBar"
+        setAccessibilityRole(.popover)
+        setAccessibilityLabel("TrinityBar Dashboard")
 
         let hosting = NSHostingController(rootView: rootView)
         hosting.sizingOptions = .intrinsicContentSize
         self.hostingView = hosting.view
 
-        let rootContainer = NSView(frame: NSRect(x: 0, y: 0, width: 332, height: 300))
         rootContainer.wantsLayer = true
         rootContainer.layer?.cornerRadius = Self.cornerRadius
         rootContainer.layer?.masksToBounds = true
 
-        let topPinned = TopPinnedContainerView(frame: rootContainer.bounds)
-        topPinned.autoresizingMask = [.width, .height]
+        topPinnedContainer.autoresizingMask = [.width, .height]
         hosting.view.frame = NSRect(x: 0, y: 0, width: 332, height: Self.permanentHostingCanvasHeight)
         hosting.view.autoresizingMask = [.width]
-        topPinned.addSubview(hosting.view)
+        topPinnedContainer.addSubview(hosting.view)
 
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
-            let solid = NSBox(frame: rootContainer.bounds)
+        rebuildBackdrop(force: true)
+
+        let wrapperVC = NSViewController()
+        wrapperVC.view = rootContainer
+        wrapperVC.addChild(hosting)
+        self.contentViewController = wrapperVC
+
+        accessibilityObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.rebuildBackdrop(force: false)
+            }
+        }
+    }
+
+    deinit {
+        if let globalClickMonitor {
+            NSEvent.removeMonitor(globalClickMonitor)
+        }
+        if let localKeyMonitor {
+            NSEvent.removeMonitor(localKeyMonitor)
+        }
+        if let localScrollMonitor {
+            NSEvent.removeMonitor(localScrollMonitor)
+        }
+        if let accessibilityObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(accessibilityObserver)
+        }
+    }
+
+    private func rebuildBackdrop(force: Bool) {
+        let reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        guard force || reduceTransparency != currentReduceTransparency else { return }
+        currentReduceTransparency = reduceTransparency
+
+        if #available(macOS 26.0, *), let glass = backdropView as? NSGlassEffectView {
+            glass.contentView = nil
+        }
+        topPinnedContainer.removeFromSuperview()
+        backdropView?.removeFromSuperview()
+        backdropView = nil
+
+        let bounds = rootContainer.bounds
+        topPinnedContainer.translatesAutoresizingMaskIntoConstraints = true
+        topPinnedContainer.autoresizingMask = [.width, .height]
+        topPinnedContainer.frame = bounds
+
+        if reduceTransparency {
+            let solid = NSBox(frame: bounds)
             solid.boxType = .custom
             solid.isTransparent = false
             solid.fillColor = .windowBackgroundColor
@@ -74,16 +134,18 @@ final class StatusFloatingPanel: NSPanel {
             solid.cornerRadius = Self.cornerRadius
             solid.autoresizingMask = [.width, .height]
             rootContainer.addSubview(solid)
-            rootContainer.addSubview(topPinned)
+            rootContainer.addSubview(topPinnedContainer)
+            backdropView = solid
         } else if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView(frame: rootContainer.bounds)
+            let glass = NSGlassEffectView(frame: bounds)
             glass.style = .regular
             glass.cornerRadius = Self.cornerRadius
             glass.autoresizingMask = [.width, .height]
-            glass.contentView = topPinned
+            glass.contentView = topPinnedContainer
             rootContainer.addSubview(glass)
+            backdropView = glass
         } else {
-            let effect = NSVisualEffectView(frame: rootContainer.bounds)
+            let effect = NSVisualEffectView(frame: bounds)
             effect.material = .popover
             effect.blendingMode = .behindWindow
             effect.state = .active
@@ -92,13 +154,13 @@ final class StatusFloatingPanel: NSPanel {
             effect.layer?.masksToBounds = true
             effect.autoresizingMask = [.width, .height]
             rootContainer.addSubview(effect)
-            rootContainer.addSubview(topPinned)
+            rootContainer.addSubview(topPinnedContainer)
+            backdropView = effect
         }
 
-        let wrapperVC = NSViewController()
-        wrapperVC.view = rootContainer
-        wrapperVC.addChild(hosting)
-        self.contentViewController = wrapperVC
+        if isVisible {
+            invalidateShadow()
+        }
     }
 
     override var canBecomeKey: Bool { true }
@@ -184,6 +246,9 @@ final class StatusFloatingPanel: NSPanel {
     }
 
     override func cancelOperation(_ sender: Any?) {
+        if onEscapePressed?() == true {
+            return
+        }
         dismissPanel()
     }
 
@@ -232,11 +297,12 @@ final class StatusFloatingPanel: NSPanel {
         }
 
         localScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
-            let dy = event.scrollingDeltaY
-            if abs(dy) > 0.05 {
-                let scaled = event.hasPreciseScrollingDeltas ? dy * 0.0035 : dy * 0.03
-                MainActor.assumeIsolated {
-                    guard let self else { return }
+            MainActor.assumeIsolated {
+                guard let self, event.window === self else { return }
+                let dy = event.scrollingDeltaY
+                if abs(dy) > 0.05 {
+                    let rawScaled = event.hasPreciseScrollingDeltas ? dy * 0.0003 : dy * 0.01
+                    let scaled = min(0.08, max(-0.08, rawScaled))
                     if self.allowsScrollVolume?() ?? true {
                         self.onScrollDeltaY?(scaled)
                     }

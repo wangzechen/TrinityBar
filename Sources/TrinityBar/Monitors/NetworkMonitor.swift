@@ -59,6 +59,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
     @Published private(set) var knownNetworks: [ScannedWiFiItem] = []
     @Published private(set) var otherNetworks: [ScannedWiFiItem] = []
     @Published private(set) var isScanningWiFi: Bool = false
+    @Published private(set) var connectingSSID: String?
     @Published private(set) var needsLocationPermission: Bool = false
 
     /// 0...3 bars for center Wi-Fi symbol
@@ -78,7 +79,10 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
     private let locationManager = CLLocationManager()
     nonisolated(unsafe) private var liveSamplerTimer: Timer?
     nonisolated(unsafe) private var signalRefreshTimer: Timer?
+    /// Accessed exclusively on `wlanWorkerQueue`.
+    nonisolated(unsafe) private var scannedCWNets: [String: CWNetwork] = [:]
     private var prevBytes: (rx: UInt64, tx: UInt64, time: TimeInterval)?
+    private var liveSampleTick: Int = 0
 
     override init() {
         super.init()
@@ -162,6 +166,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
             }()
 
             var bestBySSID: [String: ScannedWiFiItem] = [:]
+            var bestCWBySSID: [String: CWNetwork] = [:]
             if let rawSet = try? iface.scanForNetworks(withSSID: nil) {
                 for net in rawSet {
                     guard let s = net.ssid, !s.isEmpty else { continue }
@@ -195,12 +200,15 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
                                 isConnected: existing.isConnected || isConn,
                                 isKnown: existing.isKnown || isKnown
                             )
+                            bestCWBySSID[s] = net
                         }
                     } else {
                         bestBySSID[s] = candidate
+                        bestCWBySSID[s] = net
                     }
                 }
             }
+            self?.scannedCWNets = bestCWBySSID
 
             // Ensure currently connected network is always listed even if hidden from beacon scan
             if let activeSSID, !activeSSID.isEmpty, bestBySSID[activeSSID] == nil {
@@ -232,6 +240,47 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
                 self.otherNetworks = Array(others.prefix(12))
                 self.isScanningWiFi = false
             }
+        }
+    }
+
+    func connectToKnownNetwork(ssid targetSSID: String) async -> Bool {
+        guard connectingSSID == nil, wifiPowerOn else { return false }
+        connectingSSID = targetSSID
+
+        let associated: Bool = await withCheckedContinuation { continuation in
+            wlanWorkerQueue.async { [weak self] in
+                var ok = false
+                if let iface = CWWiFiClient.shared().interface(), iface.powerOn() {
+                    let candidate: CWNetwork? = self?.scannedCWNets[targetSSID] ?? {
+                        guard let data = targetSSID.data(using: .utf8),
+                              let results = try? iface.scanForNetworks(withSSID: data) else {
+                            return nil
+                        }
+                        return results.max(by: { $0.rssiValue < $1.rssiValue })
+                    }()
+
+                    if let targetNet = candidate {
+                        do {
+                            try iface.associate(to: targetNet, password: nil)
+                            ok = true
+                        } catch {
+                            ok = false
+                        }
+                    }
+                }
+                continuation.resume(returning: ok)
+            }
+        }
+
+        if associated {
+            try? await Task.sleep(for: .milliseconds(600))
+            connectingSSID = nil
+            refreshWifiAndIP()
+            scanNearbyNetworks()
+            return true
+        } else {
+            connectingSSID = nil
+            return false
         }
     }
 
@@ -268,13 +317,13 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         sampleThroughput()
         measurePing()
 
-        var tick = 0
+        liveSampleTick = 0
         liveSamplerTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.sampleThroughput()
-                tick += 1
-                if tick % 3 == 0 {
+                self.liveSampleTick += 1
+                if self.liveSampleTick % 3 == 0 {
                     self.measurePing()
                     self.refreshWifiAndIP()
                 }
@@ -456,12 +505,13 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
 
     private func sampleThroughput() {
         guard kind != .offline else {
+            prevBytes = nil
             downloadBytesPerSec = 0
             uploadBytesPerSec = 0
             return
         }
 
-        let counters = Self.readInterfaceBytes()
+        guard let counters = Self.readInterfaceBytes() else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if let prev = prevBytes {
             let dt = max(0.2, now - prev.time)
@@ -489,11 +539,14 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
             case .ready:
                 let elapsedNs = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
                 let ms = max(1, Int(round(Double(elapsedNs) / 1_000_000.0)))
+                conn.stateUpdateHandler = nil
                 conn.cancel()
                 Task { @MainActor [weak self] in
-                    self?.pingMs = ms
+                    guard let self, self.kind != .offline else { return }
+                    self.pingMs = ms
                 }
             case .failed:
+                conn.stateUpdateHandler = nil
                 conn.cancel()
             default:
                 break
@@ -502,6 +555,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         conn.start(queue: queue)
 
         queue.asyncAfter(deadline: .now() + 2.5) {
+            conn.stateUpdateHandler = nil
             conn.cancel()
         }
     }
@@ -612,27 +666,44 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         return nil
     }
 
-    private static func readInterfaceBytes() -> (rx: UInt64, tx: UInt64) {
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return (0, 0) }
-        defer { freeifaddrs(ifaddr) }
+    private static func readInterfaceBytes() -> (rx: UInt64, tx: UInt64)? {
+        var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
+        var len: size_t = 0
+        guard sysctl(&mib, 6, nil, &len, nil, 0) == 0, len > 0 else {
+            return nil
+        }
+
+        var buffer = [UInt8](repeating: 0, count: len)
+        guard sysctl(&mib, 6, &buffer, &len, nil, 0) == 0 else {
+            return nil
+        }
 
         var totalRx: UInt64 = 0
         var totalTx: UInt64 = 0
-        var ptr: UnsafeMutablePointer<ifaddrs>? = firstAddr
+        var nameBuf = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
 
-        while let current = ptr {
-            let interface = current.pointee
-            if let addr = interface.ifa_addr, addr.pointee.sa_family == UInt8(AF_LINK) {
-                let name = String(cString: interface.ifa_name)
-                if name.hasPrefix("en") || name.hasPrefix("pdp_ip"),
-                   let data = interface.ifa_data?.assumingMemoryBound(to: if_data.self) {
-                    totalRx &+= UInt64(data.pointee.ifi_ibytes)
-                    totalTx &+= UInt64(data.pointee.ifi_obytes)
+        buffer.withUnsafeBytes { rawBuf in
+            var offset = 0
+            while offset + 4 <= len {
+                let msgLen = Int(rawBuf.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
+                let msgType = rawBuf.loadUnaligned(fromByteOffset: offset + 3, as: UInt8.self)
+                guard msgLen >= 4, offset + msgLen <= len else { break }
+
+                if msgType == UInt8(RTM_IFINFO2),
+                   msgLen >= MemoryLayout<if_msghdr2>.size {
+                    let ifm2 = rawBuf.loadUnaligned(fromByteOffset: offset, as: if_msghdr2.self)
+                    if if_indextoname(UInt32(ifm2.ifm_index), &nameBuf) != nil {
+                        let name = String(decoding: nameBuf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+                        if name.hasPrefix("en") || name.hasPrefix("pdp_ip") {
+                            totalRx &+= ifm2.ifm_data.ifi_ibytes
+                            totalTx &+= ifm2.ifm_data.ifi_obytes
+                        }
+                    }
                 }
+                offset += msgLen
             }
-            ptr = interface.ifa_next
         }
+
         return (totalRx, totalTx)
     }
 }

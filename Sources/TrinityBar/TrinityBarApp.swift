@@ -31,6 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appearanceObservation: NSKeyValueObservation?
     private var boundsObservation: NSKeyValueObservation?
     private var wakeObserver: NSObjectProtocol?
+    private var statusBarLocalScrollMonitor: Any?
+    private var statusBarGlobalScrollMonitor: Any?
     private var lastRenderedKey: RenderedStatusIconKey?
     private var lastPlaceholderSize: CGFloat = 0
     private var sigTermSource: DispatchSourceSignal?
@@ -47,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
             button.action = #selector(handleStatusBarClick(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            button.toolTip = "TrinityBar — Battery, Network & Sound"
+            button.toolTip = "TrinityBar — Battery, Network & Sound (Scroll: Volume, ⌥-Click: Mute)"
             button.setAccessibilityLabel("TrinityBar")
 
             let baseView = UnscaledStatusBarImageView()
@@ -114,12 +116,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         floatingPanel.onScrollDeltaY = { [weak self] delta in
             guard let self else { return }
+            if self.audio.isMuted && delta < 0 { return }
             let next = self.audio.volume + Float(delta)
             self.audio.setVolume(next)
         }
         self.panel = floatingPanel
 
         systemIcons.setIncludesVolumeInEmblem(settings.bottomMode != .none, applyImmediately: false)
+        syncStatusBarScrollMonitors(enabled: settings.iconVolumeControl)
         observeWorkspaceWake()
         bindStateChanges()
         updateStatusIcon(force: true)
@@ -127,11 +131,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        removeStatusBarScrollMonitors()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
         caffeinate.setKeepAwake(false)
         systemIcons.restoreOnTerminateIfNeeded()
+    }
+
+    private func statusButtonScreenRect() -> NSRect? {
+        guard let button = statusItem?.button, let window = button.window else { return nil }
+        let rectInWindow = button.convert(button.bounds, to: nil)
+        return window.convertToScreen(rectInWindow)
+    }
+
+    private func handleStatusBarScroll(dy: CGFloat, isPrecise: Bool, mouseLocation: NSPoint) -> Bool {
+        guard settings.iconVolumeControl,
+              let rect = statusButtonScreenRect(),
+              rect.insetBy(dx: -2, dy: -2).contains(mouseLocation) else {
+            return false
+        }
+        if abs(dy) > 0.05 {
+            let rawScaled = isPrecise ? dy * 0.0003 : dy * 0.01
+            let scaled = min(0.08, max(-0.08, rawScaled))
+            if audio.isMuted && scaled < 0 { return true }
+            audio.setVolume(audio.volume + Float(scaled))
+        }
+        return true
+    }
+
+    private func syncStatusBarScrollMonitors(enabled: Bool) {
+        if enabled {
+            statusItem?.button?.toolTip = "TrinityBar — Battery, Network & Sound (Scroll: Volume, ⌥-Click: Mute)"
+            if statusBarGlobalScrollMonitor == nil {
+                statusBarGlobalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+                    let dy = event.scrollingDeltaY
+                    let isPrecise = event.hasPreciseScrollingDeltas
+                    let mouseLoc = NSEvent.mouseLocation
+                    Task { @MainActor [weak self] in
+                        _ = self?.handleStatusBarScroll(dy: dy, isPrecise: isPrecise, mouseLocation: mouseLoc)
+                    }
+                }
+            }
+            if statusBarLocalScrollMonitor == nil {
+                statusBarLocalScrollMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+                    let dy = event.scrollingDeltaY
+                    let isPrecise = event.hasPreciseScrollingDeltas
+                    let mouseLoc = NSEvent.mouseLocation
+                    let consumed: Bool = MainActor.assumeIsolated {
+                        self?.handleStatusBarScroll(dy: dy, isPrecise: isPrecise, mouseLocation: mouseLoc) ?? false
+                    }
+                    return consumed ? nil : event
+                }
+            }
+        } else {
+            statusItem?.button?.toolTip = "TrinityBar — Battery, Network & Sound"
+            removeStatusBarScrollMonitors()
+        }
+    }
+
+    private func removeStatusBarScrollMonitors() {
+        if let statusBarLocalScrollMonitor {
+            NSEvent.removeMonitor(statusBarLocalScrollMonitor)
+            self.statusBarLocalScrollMonitor = nil
+        }
+        if let statusBarGlobalScrollMonitor {
+            NSEvent.removeMonitor(statusBarGlobalScrollMonitor)
+            self.statusBarGlobalScrollMonitor = nil
+        }
     }
 
     private func observeWorkspaceWake() {
@@ -147,6 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshAllMonitorsAfterWake() {
+        caffeinate.refreshAfterWake()
         battery.refresh()
         network.refreshStaticTelemetry()
         audio.refresh()
@@ -221,6 +289,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        // Attach or tear down status bar scroll monitors when Icon Volume Control is toggled
+        settings.$iconVolumeControl
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] enabled in
+                self?.syncStatusBarScrollMonitors(enabled: enabled)
+            }
+            .store(in: &cancellables)
+
         // Coalesced 20ms sync for background hardware telemetry
         Publishers.Merge3(
             battery.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
@@ -258,7 +335,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }()
         let volText = audio.isMuted ? "Muted" : "Volume \(Int(round(audio.volume * 100)))%"
-        return "Battery \(battery.percentage)%, \(netText), \(volText)"
+        let powerText = battery.hasBattery ? "Battery \(battery.percentage)%" : "AC Power"
+        return "\(powerText), \(netText), \(volText)"
     }
 
     private func updateStatusIcon(force: Bool) {
@@ -272,11 +350,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }()
 
-        let quantizedProgress = (audio.effectiveProgress * 50.0).rounded() / 50.0
+        let quantizedProgress: Double = {
+            switch settings.bottomMode {
+            case .volumeArc: return (audio.effectiveProgress * 50.0).rounded() / 50.0
+            case .volumeDots, .none: return 0.0
+            }
+        }()
         let targetSize = AppSettings.fixedIconSize
         let scale = button.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
 
         let state = TrinityEmblemState(
+            hasBattery: battery.hasBattery,
             batteryPercent: battery.percentage,
             isCharging: battery.isCharging,
             isPluggedIn: battery.isPluggedIn,
@@ -322,12 +406,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func handleStatusBarClick(_ sender: NSStatusBarButton) {
-        guard let event = NSApp.currentEvent else {
-            togglePanel(sender)
-            return
-        }
+        let currentEvent = NSApp.currentEvent
+        let flags = (currentEvent?.modifierFlags ?? []).union(NSEvent.modifierFlags)
 
-        if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
+        if currentEvent?.type == .rightMouseUp || flags.contains(.control) {
             panel?.dismissPanel()
             let menu = NSMenu()
             let quitItem = NSMenuItem(title: "Quit TrinityBar", action: #selector(quitApp), keyEquivalent: "q")
@@ -337,6 +419,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem?.menu = menu
             sender.performClick(nil)
             statusItem?.menu = nil
+        } else if settings.iconVolumeControl && flags.contains(.option) {
+            audio.toggleMute()
+            updateStatusIcon(force: true)
         } else {
             togglePanel(sender)
         }

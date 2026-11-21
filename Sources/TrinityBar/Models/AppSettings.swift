@@ -43,6 +43,7 @@ final class AppSettings: ObservableObject {
     private enum Keys {
         static let bottomMode = "TrinityBar.bottomMode.v2"
         static let showTopPercentage = "TrinityBar.showTopPercentage"
+        static let iconVolumeControl = "TrinityBar.iconVolumeControl"
     }
 
     @Published var bottomMode: BottomIndicatorMode {
@@ -54,6 +55,12 @@ final class AppSettings: ObservableObject {
     @Published var showTopPercentage: Bool {
         didSet {
             UserDefaults.standard.set(showTopPercentage, forKey: Keys.showTopPercentage)
+        }
+    }
+
+    @Published var iconVolumeControl: Bool {
+        didSet {
+            UserDefaults.standard.set(iconVolumeControl, forKey: Keys.iconVolumeControl)
         }
     }
 
@@ -80,6 +87,12 @@ final class AppSettings: ObservableObject {
             self.showTopPercentage = true
         } else {
             self.showTopPercentage = defaults.bool(forKey: Keys.showTopPercentage)
+        }
+
+        if defaults.object(forKey: Keys.iconVolumeControl) == nil {
+            self.iconVolumeControl = true
+        } else {
+            self.iconVolumeControl = defaults.bool(forKey: Keys.iconVolumeControl)
         }
 
         refreshLaunchAtLoginStatus()

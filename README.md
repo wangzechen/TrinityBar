@@ -7,7 +7,7 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-**TrinityBar** is a lightweight (`~588 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and `Reduce Transparency` fallbacks).
+**TrinityBar** is a lightweight (`~640 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and live `Reduce Transparency` fallbacks).
 
 <p align="center">
   <img src="assets/preview.png" width="382" valign="top" alt="TrinityBar Summary Dashboard" />
@@ -25,6 +25,7 @@
   - **Green** with an AC plug glyph while held on external power (`isPluggedIn && !isCharging`)
   - **Yellow** in Low Power Mode or `<= 20%`, **Red** at `<= 15%`
   - Optional **Top `%` Number** (`SF Pro Rounded Bold`) with optical ink-bounds centering
+  - **Desktop Mac AC Support**: On Macs without a built-in battery (Mac mini / Mac Studio / iMac / Mac Pro), renders a clean AC plug emblem without misleading battery rings
 - **Center Network Core**: Live 3-bar Wi-Fi fan (`RSSI`-mapped), Wired Ethernet (`<->` badge), or Offline slash indicator
 - **Bottom Volume Footer**: Switchable inside **Settings** between:
   - **`Dots`** *(default)* — 4 curved volume steps
@@ -37,13 +38,13 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
 
 | Module | Summary Sub-Cards | Second-Layer Drill-Down Page |
 | :--- | :--- | :--- |
-| **Battery** | `Adapter` · `Charging / Discharging` · `System` (live Watts) | Cubic-Bezier **Sankey Power Flow** diagram (`Adapter/Battery -> Charging, System, Display, USB`), SMC electrical & thermal sensors, live **High Energy Apps** (user apps via `proc_pid_rusage`), `Battery Settings…` link |
-| **Network** | `Signal / Band` · `Latency` (`ms`) · `↓ / ↑ Throughput` | Quick Wi-Fi Power switch, live **Known / Other Networks** scanner, Location Services prompt for SSID access, expandable **Connection Details** (`SSID`, `BSSID`, `Channel`, `SNR`, `PHY`, `Tx Rate`, `IPv4/v6`, `Router`, `DNS` — click any value to copy) |
+| **Battery** | `Adapter` · `Charging / Discharging` · `System` (live Watts; AC-only cards on desktop Macs) | Cubic-Bezier **Sankey Power Flow** diagram (`Adapter/Battery -> Charging, System, Display, USB`), background SMC electrical & thermal sensors, live **High Energy Apps** (user apps via `proc_pid_rusage`), `Battery Settings…` link |
+| **Network** | `Signal / Band` · `Latency` (`ms`) · `↓ / ↑ Throughput` (64-bit counters) | Quick Wi-Fi Power switch, live **Known / Other Networks** scanner with one-click **Known Wi-Fi** direct connect, Location Services prompt for SSID access, expandable **Connection Details** (`SSID`, `BSSID`, `Channel`, `SNR`, `PHY`, `Tx Rate`, `IPv4/v6`, `Router`, `DNS` — click any value to copy) |
 | **Sound** | Tap-to-Mute `Volume %` card · Interactive **Capsule Volume Slider** | Instant **Output & Input** `CoreAudio` device switcher (MacBook Speakers, Bluetooth Headsets/AirPods, USB DACs, HDMI/AirPlay — automatically excludes internal virtual loopback drivers), expandable **Audio Details** |
 
 ### 3. Native Control Center Auto-Hide & Collapsible Settings
-- **Hide Native Icons** *(enabled by default)*: Snapshots your existing macOS Control Center `WiFi`, `Battery`, and `Sound` menu bar visibility states before hiding them, and restores your exact pre-TrinityBar layout when toggled off or when TrinityBar exits (`Quit`, `⌘Q`, `SIGTERM`, `SIGINT`).
-- **Collapsible Settings Drawer**: Houses `Volume Bar` (`Dots / Arc / None`) with a live emblem preview, `Top % Number`, `Hide Native Icons`, `Launch at Login` (`SMAppService.mainApp`), `Keep Awake` (`IOPMAssertion` display-sleep lock), and `Quit TrinityBar`, animated smoothly with zero frame-0 jump.
+- **Hide Native Icons** *(enabled by default, persisted across restarts)*: Snapshots your existing macOS Control Center `WiFi`, `Battery`, and `Sound` menu bar visibility states before hiding them, and restores your exact pre-TrinityBar layout when toggled off or when TrinityBar exits (`Quit`, `⌘Q`, `SIGTERM`, `SIGINT`).
+- **Collapsible Settings Drawer**: Houses `Volume Bar` (`Dots / Arc / None`) with a live emblem preview, `Top % Number`, `Icon Volume Control` (scroll-to-volume & `⌥`-Click mute on the menu bar icon), `Hide Native Icons`, `Launch at Login` (`SMAppService.mainApp`), timed `Keep Awake` (`30m / 1h / 2h / ∞` via `IOPMAssertion` with live countdown badge), and `Quit TrinityBar`, animated smoothly with zero frame-0 jump.
 
 ---
 
@@ -52,6 +53,8 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
 | Action | Behavior |
 | :--- | :--- |
 | **Left-click** menu bar emblem | Toggle the Liquid Glass dashboard |
+| **Scroll** on menu bar emblem | Smoothly adjust system output volume *(when `Icon Volume Control` is enabled)* |
+| **`⌥`-click** (Option-click) emblem | Toggle system output mute *(when `Icon Volume Control` is enabled)* |
 | **Right-click** (`⌃`-click) emblem | Show minimal `Quit TrinityBar (⌘Q)` menu |
 | **Two-finger scroll** on Summary / Sound | Smoothly adjust system output volume |
 | **Click** any copyable telemetry value | Copy `IPv4`, `IPv6`, `Router`, `DNS`, `SSID`, `BSSID`, etc. with `"Copied"` feedback |
@@ -66,7 +69,7 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
 - **macOS 26.0+**
 
 ### Option 1: Download Pre-built Release *(Recommended)*
-1. Download **`TrinityBar-v1.0.0-macos-arm64.zip`** from the [**Latest GitHub Release**](https://github.com/wangzechen/TrinityBar/releases/latest).
+1. Download **`TrinityBar-v1.1.0-macos-arm64.zip`** from the [**Latest GitHub Release**](https://github.com/wangzechen/TrinityBar/releases/latest).
 2. Extract the archive and drag **`TrinityBar.app`** into **`/Applications`**.
 3. Because the binary is ad-hoc signed without a paid Apple Developer ID certificate, clear macOS Gatekeeper's download quarantine flag once before first launch:
    ```zsh
@@ -119,19 +122,19 @@ TrinityBar/
 │   ├── preview.png                          # Collapsed summary dashboard screenshot
 │   └── preview-settings.png                 # Expanded settings drawer screenshot
 ├── scripts/
-│   ├── build_app.sh                         # Size-optimized swiftc bundler -> build/TrinityBar.app (v1.0.0)
+│   ├── build_app.sh                         # Size-optimized swiftc bundler -> build/TrinityBar.app (v1.1.0)
 │   └── generate_icon.swift                  # Deterministic 66 KB 1024x1024 AppIcon.icns generator
 └── Sources/TrinityBar/
-    ├── TrinityBarApp.swift                  # NSStatusItem split-layer host, Combine sync & lifecycle
+    ├── TrinityBarApp.swift                  # NSStatusItem split-layer host, icon gestures, Combine sync & lifecycle
     ├── Resources/
     │   └── AppIcon.icns                     # Minimalist 1024x1024 macOS squircle app icon (66 KB)
     ├── Models/
     │   └── AppSettings.swift                # UserDefaults preferences, PanelRoute & clipboard state
     ├── Monitors/
-    │   ├── BatteryMonitor.swift             # IOPSCopyPowerSourcesInfo + AppleSmartBattery + AppleSMC
-    │   ├── NetworkMonitor.swift             # NWPathMonitor + CoreWLAN + SCDynamicStore + getifaddrs
+    │   ├── BatteryMonitor.swift             # IOPSCopyPowerSourcesInfo + AppleSmartBattery + background AppleSMC
+    │   ├── NetworkMonitor.swift             # NWPathMonitor + CoreWLAN + SCDynamicStore + 64-bit sysctl counters
     │   ├── AudioVolumeMonitor.swift         # CoreAudio volume/mute + Output/Input device switching
-    │   ├── CaffeinateManager.swift          # IOKit IOPMAssertion display sleep prevention
+    │   ├── CaffeinateManager.swift          # Timed IOKit IOPMAssertion display sleep prevention (30m/1h/2h/∞)
     │   └── SystemIconsManager.swift         # Table-driven Control Center icon hide/snapshot/restore
     └── Views/
         ├── TrinityEmblemView.swift          # 24pt CoreGraphics emblem renderer & SwiftUI preview

@@ -148,13 +148,26 @@ struct NetworkDetailsPageView: View {
     }
 
     private func scannedNetworkRow(_ item: ScannedWiFiItem) -> some View {
-        Button {
-            if !item.isConnected {
+        let isConnecting = (network.connectingSSID == item.ssid)
+        return Button {
+            guard !item.isConnected, network.connectingSSID == nil else { return }
+            if item.isKnown {
+                Task { @MainActor in
+                    let ok = await network.connectToKnownNetwork(ssid: item.ssid)
+                    if !ok, network.wifiPowerOn, settings.route == .network {
+                        onOpenNetworkSettings()
+                    }
+                }
+            } else {
                 onOpenNetworkSettings()
             }
         } label: {
             HStack(spacing: 8) {
-                if item.isConnected {
+                if isConnecting {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .frame(width: 14, height: 14)
+                } else if item.isConnected {
                     Image(systemName: "checkmark")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.green)
@@ -187,6 +200,7 @@ struct NetworkDetailsPageView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(network.connectingSSID != nil)
     }
 
     private var connectionDetailRows: some View {

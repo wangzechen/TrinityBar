@@ -14,15 +14,17 @@ struct PowerInfoBarSection: View {
                 tint: battery.isPluggedIn ? .primary : .secondary,
                 isSilver: true
             )
+            if battery.hasBattery {
+                SummaryGlassMetricCard(
+                    symbol: battery.isCharging ? "battery.100percent.bolt" : "battery.100percent",
+                    value: batteryWattsText,
+                    label: battery.isCharging ? "Charging" : (battery.isPluggedIn ? "Battery" : "Discharging"),
+                    tint: battery.isCharging ? .green : (battery.isPluggedIn ? .secondary : .orange),
+                    isSilver: false
+                )
+            }
             SummaryGlassMetricCard(
-                symbol: battery.isCharging ? "battery.100percent.bolt" : "battery.100percent",
-                value: batteryWattsText,
-                label: battery.isCharging ? "Charging" : (battery.isPluggedIn ? "Battery" : "Discharging"),
-                tint: battery.isCharging ? .green : (battery.isPluggedIn ? .secondary : .orange),
-                isSilver: false
-            )
-            SummaryGlassMetricCard(
-                symbol: "laptopcomputer",
+                symbol: battery.hasBattery ? "laptopcomputer" : "desktopcomputer",
                 value: systemWattsText,
                 label: "System",
                 tint: .blue,

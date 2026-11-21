@@ -255,11 +255,17 @@ final class AudioVolumeMonitor: ObservableObject {
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        if AudioObjectGetPropertyData(currentOutID, &muteAddr, 0, nil, &muteSize, &muted) == noErr {
+        let hardwareMuteSupported = Self.isHardwareMuteSettable(currentOutID)
+        if AudioObjectGetPropertyData(currentOutID, &muteAddr, 0, nil, &muteSize, &muted) == noErr,
+           (hardwareMuteSupported || muted != 0) {
             isMuted = (muted != 0)
+            if !isMuted {
+                softMutedRestoreVolume = nil
+            }
         } else if softMutedRestoreVolume != nil && volume <= 0.005 {
             isMuted = true
         } else {
+            softMutedRestoreVolume = nil
             isMuted = false
         }
     }
@@ -316,6 +322,11 @@ final class AudioVolumeMonitor: ObservableObject {
         guard deviceID != kAudioObjectUnknown else { return }
 
         var clamped = Float32(min(1.0, max(0.0, newVolume)))
+        let shouldUnmute = isMuted && clamped > 0.005
+        if !shouldUnmute && abs(clamped - volume) < 0.0001 {
+            return
+        }
+
         let size = UInt32(MemoryLayout<Float32>.size)
         var volAddr = AudioObjectPropertyAddress(
             mSelector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
@@ -323,7 +334,7 @@ final class AudioVolumeMonitor: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
 
-        if isMuted && clamped > 0.01 {
+        if shouldUnmute {
             softMutedRestoreVolume = nil
             _ = Self.setHardwareMute(deviceID, muted: false)
             isMuted = false
@@ -373,7 +384,20 @@ final class AudioVolumeMonitor: ObservableObject {
 
     // MARK: - CoreAudio Helpers
 
+    private static func isHardwareMuteSettable(_ deviceID: AudioDeviceID) -> Bool {
+        var muteAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyMute,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var settable: DarwinBoolean = false
+        return AudioObjectHasProperty(deviceID, &muteAddr)
+            && AudioObjectIsPropertySettable(deviceID, &muteAddr, &settable) == noErr
+            && settable.boolValue
+    }
+
     private static func setHardwareMute(_ deviceID: AudioDeviceID, muted: Bool) -> Bool {
+        guard isHardwareMuteSettable(deviceID) else { return false }
         var flag: UInt32 = muted ? 1 : 0
         let size = UInt32(MemoryLayout<UInt32>.size)
         var muteAddr = AudioObjectPropertyAddress(
@@ -381,12 +405,6 @@ final class AudioVolumeMonitor: ObservableObject {
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        var settable: DarwinBoolean = false
-        guard AudioObjectHasProperty(deviceID, &muteAddr),
-              AudioObjectIsPropertySettable(deviceID, &muteAddr, &settable) == noErr,
-              settable.boolValue else {
-            return false
-        }
         return AudioObjectSetPropertyData(deviceID, &muteAddr, 0, nil, size, &flag) == noErr
     }
 

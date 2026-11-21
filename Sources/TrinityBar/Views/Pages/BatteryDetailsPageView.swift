@@ -11,7 +11,10 @@ struct BatteryDetailsPageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
-            NavigationBackHeader(title: "Battery · \(battery.percentage)%", onBack: onBack)
+            NavigationBackHeader(
+                title: battery.hasBattery ? "Battery · \(battery.percentage)%" : "Power · AC",
+                onBack: onBack
+            )
 
             BatteryPowerFlowDiagram(battery: battery)
 
@@ -24,43 +27,45 @@ struct BatteryDetailsPageView: View {
                     value: powerSourceValue,
                     settings: settings
                 )
-                DetailKeyValueRow(
-                    keyID: "bat.time",
-                    label: battery.isCharging ? "Time to Full" : "Time Remaining",
-                    value: timeEstimateValue,
-                    settings: settings
-                )
-                DetailKeyValueRow(
-                    keyID: "bat.health",
-                    label: "Battery Health",
-                    value: healthDetailValue,
-                    settings: settings
-                )
-                if let cycles = battery.cycleCount {
+                if battery.hasBattery {
                     DetailKeyValueRow(
-                        keyID: "bat.cycles",
-                        label: "Cycle Count",
-                        value: "\(cycles)",
+                        keyID: "bat.time",
+                        label: battery.isCharging ? "Time to Full" : "Time Remaining",
+                        value: timeEstimateValue,
                         settings: settings
                     )
-                }
-                if let temp = battery.temperatureCelsius {
                     DetailKeyValueRow(
-                        keyID: "bat.temp",
-                        label: "Temperature",
-                        value: String(format: "%.1f °C", temp),
+                        keyID: "bat.health",
+                        label: "Battery Health",
+                        value: healthDetailValue,
                         settings: settings
                     )
-                }
-                if let v = battery.voltageVolts {
-                    let ampPart = battery.amperageMA.map { String(format: " · %+d mA", $0) } ?? ""
-                    DetailKeyValueRow(
-                        keyID: "bat.elec",
-                        label: "Voltage / Current",
-                        value: String(format: "%.2f V", v) + ampPart,
-                        copyable: true,
-                        settings: settings
-                    )
+                    if let cycles = battery.cycleCount {
+                        DetailKeyValueRow(
+                            keyID: "bat.cycles",
+                            label: "Cycle Count",
+                            value: "\(cycles)",
+                            settings: settings
+                        )
+                    }
+                    if let temp = battery.temperatureCelsius {
+                        DetailKeyValueRow(
+                            keyID: "bat.temp",
+                            label: "Temperature",
+                            value: String(format: "%.1f °C", temp),
+                            settings: settings
+                        )
+                    }
+                    if let v = battery.voltageVolts {
+                        let ampPart = battery.amperageMA.map { String(format: " · %+d mA", $0) } ?? ""
+                        DetailKeyValueRow(
+                            keyID: "bat.elec",
+                            label: "Voltage / Current",
+                            value: String(format: "%.2f V", v) + ampPart,
+                            copyable: true,
+                            settings: settings
+                        )
+                    }
                 }
             }
 
@@ -104,7 +109,10 @@ struct BatteryDetailsPageView: View {
 
             Divider().opacity(0.45)
 
-            SettingsExternalLinkRow(title: "Battery Settings…", action: onOpenBatterySettings)
+            SettingsExternalLinkRow(
+                title: battery.hasBattery ? "Battery Settings…" : "Energy Settings…",
+                action: onOpenBatterySettings
+            )
         }
     }
 
