@@ -1,0 +1,373 @@
+import AppKit
+import QuartzCore
+import SwiftUI
+import Combine
+
+/// Non-hit-testing overlay image view with `.scaleNone` so `NSButtonCell` never downscales icons taller than 18pt.
+private final class UnscaledStatusBarImageView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+private struct RenderedStatusIconKey: Equatable {
+    let emblem: TrinityEmblemState
+    let scale: CGFloat
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var statusItem: NSStatusItem?
+    private var templateImageView: UnscaledStatusBarImageView?
+    private var chromaticImageView: UnscaledStatusBarImageView?
+    private var panel: StatusFloatingPanel?
+
+    private let settings = AppSettings()
+    private let battery = BatteryMonitor()
+    private let network = NetworkMonitor()
+    private let audio = AudioVolumeMonitor()
+    private let caffeinate = CaffeinateManager()
+    private let systemIcons = SystemIconsManager()
+
+    private var cancellables = Set<AnyCancellable>()
+    private var appearanceObservation: NSKeyValueObservation?
+    private var boundsObservation: NSKeyValueObservation?
+    private var wakeObserver: NSObjectProtocol?
+    private var lastRenderedKey: RenderedStatusIconKey?
+    private var lastPlaceholderSize: CGFloat = 0
+    private var sigTermSource: DispatchSourceSignal?
+    private var sigIntSource: DispatchSourceSignal?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApplication.shared.setActivationPolicy(.accessory)
+        setupSignalHandlers()
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        self.statusItem = item
+        if let button = item.button {
+            button.imageScaling = .scaleNone
+            button.target = self
+            button.action = #selector(handleStatusBarClick(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.toolTip = "TrinityBar — Battery, Network & Sound"
+            button.setAccessibilityLabel("TrinityBar")
+
+            let baseView = UnscaledStatusBarImageView()
+            baseView.imageScaling = .scaleNone
+            baseView.setAccessibilityElement(false)
+            button.addSubview(baseView)
+            self.templateImageView = baseView
+
+            let colorView = UnscaledStatusBarImageView()
+            colorView.imageScaling = .scaleNone
+            colorView.setAccessibilityElement(false)
+            button.addSubview(colorView)
+            self.chromaticImageView = colorView
+
+            appearanceObservation = button.observe(\.effectiveAppearance, options: [.new, .initial]) { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    self?.updateStatusIcon(force: true)
+                }
+            }
+
+            boundsObservation = button.observe(\.bounds, options: [.new]) { [weak self] _, change in
+                guard let bounds = change.newValue else { return }
+                Task { @MainActor [weak self] in
+                    self?.centerOverlay(in: bounds)
+                }
+            }
+        }
+
+        let contentView = PopoverDashboardView(
+            battery: battery,
+            network: network,
+            audio: audio,
+            caffeinate: caffeinate,
+            systemIcons: systemIcons,
+            settings: settings,
+            onDismissPanel: { [weak self] in
+                self?.panel?.dismissPanel()
+            }
+        )
+
+        let floatingPanel = StatusFloatingPanel(rootView: contentView)
+        floatingPanel.onClose = { [weak self] in
+            guard let self else { return }
+            self.network.setPopoverVisible(false)
+            self.battery.setPopoverVisible(false)
+            self.settings.route = .summary
+            self.settings.summarySettingsExpanded = false
+        }
+        floatingPanel.onEscapePressed = { [weak self] in
+            guard let self else { return false }
+            if self.settings.route != .summary {
+                self.settings.route = .summary
+                return true
+            }
+            if self.settings.summarySettingsExpanded {
+                self.settings.summarySettingsExpanded = false
+                return true
+            }
+            return false
+        }
+        floatingPanel.allowsScrollVolume = { [weak self] in
+            guard let route = self?.settings.route else { return false }
+            return route == .summary || route == .sound
+        }
+        floatingPanel.onScrollDeltaY = { [weak self] delta in
+            guard let self else { return }
+            let next = self.audio.volume + Float(delta)
+            self.audio.setVolume(next)
+        }
+        self.panel = floatingPanel
+
+        systemIcons.setIncludesVolumeInEmblem(settings.bottomMode != .none, applyImmediately: false)
+        observeWorkspaceWake()
+        bindStateChanges()
+        updateStatusIcon(force: true)
+        systemIcons.applyOnLaunchIfNeeded()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+        caffeinate.setKeepAwake(false)
+        systemIcons.restoreOnTerminateIfNeeded()
+    }
+
+    private func observeWorkspaceWake() {
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshAllMonitorsAfterWake()
+            }
+        }
+    }
+
+    private func refreshAllMonitorsAfterWake() {
+        battery.refresh()
+        network.refreshStaticTelemetry()
+        audio.refresh()
+        updateStatusIcon(force: true)
+
+        // Follow-up refresh once Wi-Fi DHCP and Bluetooth audio profiles finish reconnecting
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self else { return }
+            self.battery.refresh()
+            self.network.refreshStaticTelemetry()
+            self.audio.refresh()
+            self.updateStatusIcon(force: true)
+        }
+    }
+
+    private func centerOverlay(in buttonBounds: NSRect) {
+        let s = AppSettings.fixedIconSize
+        let frame = TrinityStatusIconRenderer.contentFrame(in: buttonBounds, contentSize: CGSize(width: s, height: s))
+        templateImageView?.frame = frame
+        chromaticImageView?.frame = frame
+    }
+
+    private func setupSignalHandlers() {
+        signal(SIGTERM, SIG_IGN)
+        signal(SIGINT, SIG_IGN)
+
+        let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        termSource.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                self?.caffeinate.setKeepAwake(false)
+                self?.systemIcons.restoreOnTerminateIfNeeded()
+                exit(0)
+            }
+        }
+        termSource.resume()
+        self.sigTermSource = termSource
+
+        let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        intSource.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                self?.caffeinate.setKeepAwake(false)
+                self?.systemIcons.restoreOnTerminateIfNeeded()
+                exit(0)
+            }
+        }
+        intSource.resume()
+        self.sigIntSource = intSource
+    }
+
+    private func bindStateChanges() {
+        // Immediate 0ms panel height sync whenever route or disclosure toggles change
+        settings.objectWillChange
+            .sink { [weak self] _ in
+                guard let self else { return }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.updateStatusIcon(force: false)
+                    if let panel = self.panel, panel.isVisible {
+                        panel.syncHeightToContent(animated: true)
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        // Sync native macOS Sound status bar icon visibility whenever Volume Bar switches to/from None
+        settings.$bottomMode
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] mode in
+                self?.systemIcons.setIncludesVolumeInEmblem(mode != .none)
+            }
+            .store(in: &cancellables)
+
+        // Coalesced 20ms sync for background hardware telemetry
+        Publishers.Merge3(
+            battery.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+            network.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
+            audio.objectWillChange.map { _ in () }.eraseToAnyPublisher()
+        )
+        .debounce(for: .milliseconds(20), scheduler: RunLoop.main)
+        .sink { [weak self] _ in
+            guard let self else { return }
+            self.updateStatusIcon(force: false)
+            if let panel = self.panel, panel.isVisible {
+                DispatchQueue.main.async { [weak self] in
+                    self?.panel?.syncHeightToContent(animated: true)
+                }
+            }
+        }
+        .store(in: &cancellables)
+    }
+
+    private func isButtonDarkAppearance(_ button: NSStatusBarButton) -> Bool {
+        let appearance = button.effectiveAppearance
+        if let match = appearance.bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight]) {
+            return match == .darkAqua || match == .vibrantDark
+        }
+        return appearance.name.rawValue.localizedCaseInsensitiveContains("dark")
+    }
+
+    private func accessibilityStatusSummary() -> String {
+        let netText: String = {
+            switch network.kind {
+            case .wifi: return network.ssid ?? "Wi-Fi"
+            case .ethernet: return "Ethernet"
+            case .other: return "Connected"
+            case .offline: return "Offline"
+            }
+        }()
+        let volText = audio.isMuted ? "Muted" : "Volume \(Int(round(audio.volume * 100)))%"
+        return "Battery \(battery.percentage)%, \(netText), \(volText)"
+    }
+
+    private func updateStatusIcon(force: Bool) {
+        guard let button = statusItem?.button else { return }
+        button.setAccessibilityValue(accessibilityStatusSummary())
+
+        let activeDots: Int = {
+            switch settings.bottomMode {
+            case .volumeDots: return audio.volumeDots
+            case .volumeArc, .none: return 0
+            }
+        }()
+
+        let quantizedProgress = (audio.effectiveProgress * 50.0).rounded() / 50.0
+        let targetSize = AppSettings.fixedIconSize
+        let scale = button.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+
+        let state = TrinityEmblemState(
+            batteryPercent: battery.percentage,
+            isCharging: battery.isCharging,
+            isPluggedIn: battery.isPluggedIn,
+            isLowPowerMode: battery.isLowPowerMode,
+            showTopPercentage: settings.showTopPercentage,
+            connectionKind: network.kind,
+            wifiStrengthBars: network.wifiStrengthBars,
+            bottomMode: settings.bottomMode,
+            bottomDots: activeDots,
+            bottomProgress: quantizedProgress,
+            isDarkMenuBar: isButtonDarkAppearance(button)
+        )
+
+        let key = RenderedStatusIconKey(emblem: state, scale: scale)
+        if !force, key == lastRenderedKey {
+            return
+        }
+        lastRenderedKey = key
+
+        // Reserve horizontal menu bar slot with a transparent placeholder image
+        if lastPlaceholderSize != targetSize {
+            let placeholder = NSImage(size: NSSize(width: targetSize, height: 18))
+            button.image = placeholder
+            lastPlaceholderSize = targetSize
+        }
+
+        if let layers = TrinityStatusIconRenderer.menuBarLayers(
+            state: state,
+            size: targetSize,
+            scale: scale,
+            appearance: button.effectiveAppearance
+        ) {
+            templateImageView?.image = layers.templateBase
+            if let overlayCG = layers.chromaticOverlay {
+                let colorImg = NSImage(cgImage: overlayCG, size: NSSize(width: targetSize, height: targetSize))
+                colorImg.isTemplate = false
+                chromaticImageView?.image = colorImg
+            } else {
+                chromaticImageView?.image = nil
+            }
+            centerOverlay(in: button.bounds)
+        }
+    }
+
+    @objc private func handleStatusBarClick(_ sender: NSStatusBarButton) {
+        guard let event = NSApp.currentEvent else {
+            togglePanel(sender)
+            return
+        }
+
+        if event.type == .rightMouseUp || event.modifierFlags.contains(.control) {
+            panel?.dismissPanel()
+            let menu = NSMenu()
+            let quitItem = NSMenuItem(title: "Quit TrinityBar", action: #selector(quitApp), keyEquivalent: "q")
+            quitItem.target = self
+            menu.addItem(quitItem)
+
+            statusItem?.menu = menu
+            sender.performClick(nil)
+            statusItem?.menu = nil
+        } else {
+            togglePanel(sender)
+        }
+    }
+
+    private func togglePanel(_ sender: NSStatusBarButton) {
+        guard let panel else { return }
+        if panel.isVisible {
+            panel.dismissPanel()
+        } else if !panel.recentlyClosedByOutsideClick {
+            settings.route = .summary
+            settings.refreshLaunchAtLoginStatus()
+            audio.refresh()
+            battery.setPopoverVisible(true)
+            network.setPopoverVisible(true)
+            panel.present(below: sender)
+        }
+    }
+
+    @objc private func quitApp() {
+        NSApplication.shared.terminate(nil)
+    }
+}
+
+@main
+struct TrinityBarMain {
+    @MainActor
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        app.delegate = delegate
+        app.run()
+    }
+}
