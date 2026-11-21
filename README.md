@@ -1,5 +1,6 @@
 # TrinityBar
 
+[![Release](https://img.shields.io/github/v/release/wangzechen/TrinityBar?color=brightgreen)](https://github.com/wangzechen/TrinityBar/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-black?logo=apple)
 ![Arch](https://img.shields.io/badge/arch-Apple%20Silicon-blue)
 ![Swift](https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white)
@@ -56,6 +57,54 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
 
 ---
 
+## Installation
+
+### System Requirements
+- **Apple Silicon Mac** (`arm64` — M1 / M2 / M3 / M4 or newer)
+- **macOS 26.0+**
+
+### Option 1: Download Pre-built Release *(Recommended)*
+1. Download **`TrinityBar-v1.0.0-macos-arm64.zip`** from the [**Latest GitHub Release**](https://github.com/wangzechen/TrinityBar/releases/latest).
+2. Extract the archive and drag **`TrinityBar.app`** into **`/Applications`**.
+3. Because the binary is ad-hoc signed without a paid Apple Developer ID certificate, clear macOS Gatekeeper's download quarantine flag once before first launch:
+   ```zsh
+   xattr -cr /Applications/TrinityBar.app
+   open /Applications/TrinityBar.app
+   ```
+
+### Option 2: Build from Source
+Requires Xcode Command Line Tools (`xcode-select --install`):
+
+```zsh
+git clone https://github.com/wangzechen/TrinityBar.git
+cd TrinityBar
+./scripts/build_app.sh
+cp -R build/TrinityBar.app /Applications/
+open /Applications/TrinityBar.app
+```
+
+> **Location Permission for Wi-Fi SSID**: macOS redacts Wi-Fi `SSID` and `BSSID` strings unless Location Services access is granted to the `.app` bundle. Open the **Wi-Fi** detail page inside TrinityBar and click the blue **Allow Location Access** banner if you want network names displayed.
+
+### Uninstall & Preferences Reset
+Quitting TrinityBar normally (`Quit TrinityBar`, `⌘Q`, or `SIGTERM`) automatically restores your native macOS `Wi-Fi`, `Battery`, and `Sound` menu bar icons.
+
+- **Remove the app & saved preferences**:
+  ```zsh
+  killall TrinityBar 2>/dev/null || true
+  rm -rf /Applications/TrinityBar.app
+  defaults delete com.zechen.trinitybar
+  ```
+- **Manual native icon recovery** *(only needed if TrinityBar was force-killed with `SIGKILL` / `kill -9`)*:
+  ```zsh
+  for key in WiFi Battery Sound; do
+    defaults -currentHost write com.apple.controlcenter "$key" -int 18
+    defaults write com.apple.controlcenter "NSStatusItem Visible $key" -bool true
+  done
+  killall ControlCenter
+  ```
+
+---
+
 ## Project Structure
 
 ```text
@@ -93,44 +142,6 @@ TrinityBar/
             ├── NetworkDetailsPageView.swift # Wi-Fi scanner + expandable link telemetry
             └── SoundDetailsPageView.swift   # CoreAudio Output/Input switcher + audio stream telemetry
 ```
-
----
-
-## Build & Run
-
-### Requirements
-- **Apple Silicon Mac** (`arm64`)
-- **macOS 26.0+** & Xcode Command Line Tools (`xcrun`, `swiftc`)
-
-### Build Release `.app` Bundle (`v1.0.0`)
-```zsh
-./scripts/build_app.sh
-open build/TrinityBar.app
-```
-
-### Install to `/Applications` (Optional)
-```zsh
-cp -R build/TrinityBar.app /Applications/
-```
-*(If transferring a pre-built ad-hoc signed `TrinityBar.app` to another Mac, clear the download quarantine flag once via `xattr -cr /Applications/TrinityBar.app`.)*
-
-> **Location Permission for Wi-Fi SSID**: macOS redacts Wi-Fi `SSID` and `BSSID` strings unless Location Services access is granted to the `.app` bundle. Open the **Wi-Fi** detail page inside TrinityBar and click the blue **Allow Location Access** banner if you want network names displayed.
-
-### Uninstall & Preferences Reset
-Quitting TrinityBar normally (`Quit`, `⌘Q`, or `SIGTERM`) automatically restores your native macOS `Wi-Fi`, `Battery`, and `Sound` menu bar icons.
-
-- **Clear saved TrinityBar preferences** (`UserDefaults` domain `com.zechen.trinitybar`):
-  ```zsh
-  defaults delete com.zechen.trinitybar
-  ```
-- **Manual native icon recovery** *(only needed if TrinityBar was force-killed with `SIGKILL` / `kill -9`)*:
-  ```zsh
-  for key in WiFi Battery Sound; do
-    defaults -currentHost write com.apple.controlcenter "$key" -int 18
-    defaults write com.apple.controlcenter "NSStatusItem Visible $key" -bool true
-  done
-  killall ControlCenter
-  ```
 
 ---
 
