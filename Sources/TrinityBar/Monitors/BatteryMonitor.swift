@@ -4,6 +4,25 @@ import Foundation
 import IOKit
 import IOKit.ps
 
+/// Single source of truth for battery status coloring, shared by the menu bar emblem and the dashboard.
+enum BatteryAlertLevel: Sendable, Equatable {
+    case charging // charging or held on external power -> green
+    case critical // <= 15% -> red
+    case low // Low Power Mode or <= 20% -> yellow
+    case normal // monochrome
+
+    static let criticalThreshold = 15
+    static let lowThreshold = 20
+
+    static func resolve(hasBattery: Bool, percent: Int, isCharging: Bool, isPluggedIn: Bool, isLowPowerMode: Bool) -> BatteryAlertLevel {
+        guard hasBattery else { return .normal }
+        if isCharging || isPluggedIn { return .charging }
+        if percent <= criticalThreshold { return .critical }
+        if isLowPowerMode || percent <= lowThreshold { return .low }
+        return .normal
+    }
+}
+
 struct EnergyAppItem: Identifiable, Equatable {
     let id: String // bundlePath
     let name: String
@@ -43,6 +62,16 @@ final class BatteryMonitor: ObservableObject {
     @Published private(set) var highEnergyApps: [EnergyAppItem] = []
     @Published private(set) var isSamplingEnergyApps: Bool = false
 
+    var alertLevel: BatteryAlertLevel {
+        .resolve(
+            hasBattery: hasBattery,
+            percent: percentage,
+            isCharging: isCharging,
+            isPluggedIn: isPluggedIn,
+            isLowPowerMode: isLowPowerMode
+        )
+    }
+
     private struct RawAppCounter: Sendable {
         let cpuNs: UInt64
         let energyNj: UInt64
@@ -65,6 +94,9 @@ final class BatteryMonitor: ObservableObject {
     nonisolated(unsafe) private var smcTask: Task<Void, Never>?
     nonisolated(unsafe) private var energyAppsTask: Task<Void, Never>?
     private var isPopoverVisible: Bool = false
+    /// While the popover samples AppleSMC battery voltage/current, those readings own `wattage`, `voltageVolts`
+    /// and `amperageMA`; the IORegistry values are skipped so the two sources don't alternate every tick.
+    private var smcProvidesBatteryElectrical = false
     private var smcGeneration: UInt64 = 0
     private var energySampleGeneration: UInt64 = 0
     private var lastAppSampleTime: TimeInterval?
@@ -84,7 +116,7 @@ final class BatteryMonitor: ObservableObject {
             NotificationCenter.default.removeObserver(powerStateObserver)
         }
         if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         }
     }
 
@@ -96,6 +128,7 @@ final class BatteryMonitor: ObservableObject {
         guard visible else {
             smcGeneration &+= 1
             energySampleGeneration &+= 1
+            smcProvidesBatteryElectrical = false
             smcTask?.cancel()
             smcTask = nil
             energyAppsTask?.cancel()
@@ -132,7 +165,8 @@ final class BatteryMonitor: ObservableObject {
         }
 
         if let source = IOPSNotificationCreateRunLoopSource(callback, context)?.takeRetainedValue() {
-            CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+            // Common modes so plug/unplug events still land while a menu or drag is tracking events.
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
             self.runLoopSource = source
         }
 
@@ -274,7 +308,7 @@ final class BatteryMonitor: ObservableObject {
             }
         }
 
-        if let mv = props["Voltage"] as? Int, mv > 1_000 {
+        if !smcProvidesBatteryElectrical, let mv = props["Voltage"] as? Int, mv > 1_000 {
             setIfChanged(\.voltageVolts, to: Double(mv) / 1000.0)
             if let rawAmp = props["InstantAmperage"] as? Int, abs(rawAmp) < 30_000 {
                 setIfChanged(\.amperageMA, to: rawAmp)
@@ -314,9 +348,12 @@ final class BatteryMonitor: ObservableObject {
            let bv = snapshot.batteryVoltageVolts,
            let ba = snapshot.batteryAmperageMA,
            let w = snapshot.batteryWattage {
+            smcProvidesBatteryElectrical = true
             if voltageVolts != bv { voltageVolts = bv }
             if amperageMA != ba { amperageMA = ba }
             if wattage != w { wattage = w }
+        } else {
+            smcProvidesBatteryElectrical = false
         }
     }
 

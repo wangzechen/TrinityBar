@@ -85,10 +85,10 @@ All monitors are `@MainActor ObservableObject` classes designed to keep idle bac
   - **Background**: Event-driven `IOPSNotificationCreateRunLoopSource` + `NSProcessInfoPowerStateDidChange` + `30s` fallback timer reading `IOPSCopyPowerSourcesInfo` and `AppleSmartBattery` IORegistry properties (including desktop Mac `hasBattery == false` AC-only handling).
   - **Popover Open (`2s` timer)**: Offloads read-only `AppleSMC` FourCC power keys (`PSTR`, `PDTR`, `PDBR`/`PBLR`, `DnJV`/`DnJI`) and per-app `proc_pid_rusage` (`RUSAGE_INFO_V6` `ri_energy_nj` / `mach_timebase_info`-scaled CPU deltas) onto `Task.detached(priority: .utility)` so the main thread never stalls, excluding headless `/System/Library/` OS daemons and cancelling in-flight tasks when the panel closes.
 - **`NetworkMonitor.swift`**:
-  - **Background**: Event-driven `NWPathMonitor`, `CoreWLAN` (`CWWiFiClient`), and `SCDynamicStore` (`State:/Network/Global/IPv4`, `DNS`) callbacks.
+  - **Background**: Event-driven `NWPathMonitor` plus a `12s` link refresh. All synchronous `CoreWLAN` (`CWWiFiClient`, each getter is an XPC round-trip to `airportd`) and `SCDynamicStore` (`State:/Network/Global/IPv4`, `DNS`) reads run on a dedicated serial `linkQueue` into an immutable `LinkSnapshot`, which is applied on the main actor; overlapping refresh requests coalesce.
   - **Popover Open**: `1.5s` 64-bit `sysctl` (`NET_RT_IFLIST2` / `RTM_IFINFO2` / `if_data64`) throughput delta sampler (avoiding 32-bit 4 GiB wraparound), non-blocking TCP `NWConnection` latency probe, async `CWInterface.scanForNetworks(withSSID:)` scanner, and one-click `CWInterface.associate(to:password:nil)` switching for Known Networks.
 - **`AudioVolumeMonitor.swift`**:
-  - **Purely Event-Driven**: Registers `AudioObjectAddPropertyListener` callbacks on `kAudioHardwarePropertyDefaultOutputDevice`, `kAudioHardwarePropertyDefaultInputDevice`, `kAudioHardwarePropertyDevices`, `kAudioHardwareServiceDeviceProperty_VirtualMainVolume`, and `kAudioDevicePropertyMute`.
+  - **Purely Event-Driven**: Two `AudioObjectAddPropertyListenerBlock` listeners — system-level (`kAudioHardwarePropertyDefaultOutputDevice`, `kAudioHardwarePropertyDefaultInputDevice`, `kAudioHardwarePropertyDevices`) triggers a full device re-enumeration, while the active output's `kAudioHardwareServiceDeviceProperty_VirtualMainVolume` / `kAudioDevicePropertyMute` listener only re-reads the two scalars, so scroll-driven volume changes never enumerate every device.
   - **Loopback Driver Filtering**: Checks `kAudioDevicePropertyDeviceCanBeDefaultDevice == 1` in the target scope — matching macOS **System Settings → Sound** so internal virtual loopback drivers (e.g., `Microsoft Teams Audio` / `MSLoopbackDriverDevice_UID`) are excluded while physical, Bluetooth, USB, HDMI, and AirPlay endpoints remain selectable.
   - **Soft-Mute Fallback**: Devices without settable hardware `kAudioDevicePropertyMute` (common on Bluetooth headsets) transparently fall back to storing pre-mute volume and setting virtual main volume to `0.0`.
 - **`CaffeinateManager.swift`**:
@@ -96,11 +96,12 @@ All monitors are `@MainActor ObservableObject` classes designed to keep idle bac
 - **`SystemIconsManager.swift`**:
   - Uses a table-driven `ManagedControlCenterItem` list (`WiFi`, `Battery`, `Sound`) to snapshot and manage `com.apple.controlcenter` preferences (`byHost` visibility integer + `NSStatusItem Visible <key>`), persisting the user's `Hide Native Icons` preference across restarts with crash-recovery restoration.
   - Coordinates automatically with `AppSettings.$bottomMode`: switching `Volume Bar` to `None` immediately surfaces the native macOS `Sound` status bar icon while keeping `WiFi` and `Battery` hidden; exiting TrinityBar (`Quit`, `⌘Q`, `SIGTERM`, `SIGINT`) flushes state and restores all original snapshots.
+  - With `Hide Native Icons` OFF, `Volume Bar = None` still force-shows the native `Sound` icon, but first saves the user's own Sound setting into a separate `SoundForced` snapshot slot; switching back to `Dots` / `Arc`, enabling `Hide Native Icons`, or quitting hands that setting back.
 
 ### 2.4 Build Pipeline & Bundle Size Optimization (`scripts/`)
-- **`scripts/build_app.sh`** compiles directly via `swiftc -Osize -whole-module-optimization -parse-as-library -strict-concurrency=complete -warnings-as-errors -Xlinker -dead_strip` followed by `strip -x`, producing a **`~565 KB`** arm64 executable without requiring external SwiftPM macro plugin binaries.
-  - **Important Constraint**: Do not introduce `@State` (which depends on the `SwiftUIMacros` compiler plugin) inside `View` structs; store transient navigation or disclosure flags as `@Published` properties on `AppSettings`.
-- **`scripts/generate_icon.swift`** renders a crisp `1024x1024` vector squircle icon and writes a single-chunk `ic10` PNG-backed `AppIcon.icns` (**`66 KB`**), keeping the entire packaged `TrinityBar.app` (`v1.1.1`) at **`~656 KB`**.
+- **`scripts/build_app.sh`** compiles directly via `swiftc -Osize -whole-module-optimization -parse-as-library -strict-concurrency=complete -warnings-as-errors -Xlinker -dead_strip` followed by `strip -x`, producing a **`~582 KB`** arm64 executable without requiring external SwiftPM macro plugin binaries.
+  - **Disclosure State Convention**: Store transient navigation and disclosure flags (`route`, `summarySettingsExpanded`, section expand toggles) as `@Published` properties on `AppSettings` rather than view-local `@State`. `@State` itself compiles fine under this `swiftc` pipeline (it is a property wrapper, not a macro), but `AppDelegate` subscribes to `settings.objectWillChange` to drive `StatusFloatingPanel.syncHeightToContent`, and reads `route` / `summarySettingsExpanded` for `Esc`, close, and scroll-to-volume handling — a flag moved into `@State` would expand or collapse content without resizing the panel. Avoid actual macros (`@Observable`, `#Preview`, `@Entry`), which do require the `SwiftUIMacros` plugin.
+- **`scripts/generate_icon.swift`** renders a crisp `1024x1024` vector squircle icon and writes a single-chunk `ic10` PNG-backed `AppIcon.icns` (**`66 KB`**), keeping the entire packaged `TrinityBar.app` (`v1.1.2`) at **`~660 KB`**.
 
 ---
 
@@ -121,8 +122,8 @@ All monitors are `@MainActor ObservableObject` classes designed to keep idle bac
 3. **Summary Sub-Cards**: Add `<Domain>InfoBarSection` in `Sources/TrinityBar/Views/Components/SummaryMetricSections.swift` using `SummaryGlassMetricCard` (`height: 40pt`, `cornerRadius: 10pt`).
 4. **Detail Page**: Create `Sources/TrinityBar/Views/Pages/<Domain>DetailsPageView.swift` using `NavigationBackHeader`, `CollapsibleSectionHeader`, `DetailKeyValueRow`, and `SettingsExternalLinkRow`.
 5. **Dashboard Wiring**:
-   - Add a `SummaryModuleHeaderRow` + `<Domain>InfoBarSection` block inside `PopoverDashboardView.summaryContent`.
-   - Route `.bluetooth` inside `PopoverDashboardView.body`'s `switch settings.route` (`StatusFloatingPanel` automatically measures and animates to the new route's `fittingSize`).
+   - Add a private `<Domain>SummarySection` view (owning its own `@ObservedObject` monitor, wrapping `SummaryModuleHeaderRow` + `<Domain>InfoBarSection`) inside `PopoverDashboardView.summaryContent`. `PopoverDashboardView` itself only observes `AppSettings`, so keep per-monitor observation inside the section to avoid re-evaluating the whole panel on every telemetry tick.
+   - Route `.bluetooth` inside `PopoverDashboardView.body`'s `switch settings.route` (`StatusFloatingPanel` automatically measures and animates to the new route's `fittingSize`). Add any System Settings deep link as a `SystemSettingsPane` case.
 6. **Build Script**: `scripts/build_app.sh` automatically discovers all `Sources/TrinityBar/**/*.swift` files — no manual file list update required.
 
 ### 3.2 Managing Additional Native Control Center Icons

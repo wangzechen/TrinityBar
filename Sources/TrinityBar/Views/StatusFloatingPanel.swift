@@ -254,6 +254,11 @@ final class StatusFloatingPanel: NSPanel {
     }
 
     override func cancelOperation(_ sender: Any?) {
+        handleEscape()
+    }
+
+    /// Escape pops a drill-down route / collapses the drawer first; dismisses only from the bare summary.
+    private func handleEscape() {
         if onEscapePressed?() == true {
             return
         }
@@ -294,10 +299,7 @@ final class StatusFloatingPanel: NSPanel {
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
             if event.keyCode == 53 { // Escape
                 MainActor.assumeIsolated {
-                    if let self, self.onEscapePressed?() == true {
-                        return
-                    }
-                    self?.dismissPanel()
+                    self?.handleEscape()
                 }
                 return nil
             }

@@ -13,6 +13,26 @@ enum ConnectionKind: Sendable, Equatable {
     case offline
 }
 
+/// Shared RSSI -> 0...3 bar quantization so the menu bar emblem and the Wi-Fi list always agree.
+enum WiFiSignal {
+    static func bars(rssi: Int) -> Int {
+        if rssi >= -70 { return 3 }
+        if rssi >= -78 { return 2 }
+        if rssi >= -88 { return 1 }
+        return 0
+    }
+
+    /// SF Symbol `variableValue` for the `wifi` glyph.
+    static func variableValue(bars: Int) -> Double {
+        switch bars {
+        case 3...: return 1.0
+        case 2: return 0.66
+        case 1: return 0.33
+        default: return 0.0
+        }
+    }
+}
+
 struct ScannedWiFiItem: Identifiable, Equatable, Sendable {
     let id: String // ssid
     let ssid: String
@@ -23,11 +43,35 @@ struct ScannedWiFiItem: Identifiable, Equatable, Sendable {
 
     var signalVariableValue: Double {
         guard let rssi else { return 1.0 }
-        if rssi >= -68 { return 1.0 }
-        if rssi >= -78 { return 0.66 }
-        if rssi >= -88 { return 0.33 }
-        return 0.0
+        return WiFiSignal.variableValue(bars: WiFiSignal.bars(rssi: rssi))
     }
+}
+
+/// Immutable snapshot of CoreWLAN + SCDynamicStore link state, gathered off the main thread.
+private struct LinkSnapshot: Sendable {
+    struct Wireless: Sendable {
+        var rssi: Int?
+        var noiseDbm: Int?
+        var linkRateMbps: Double?
+        var ssid: String?
+        var bssid: String?
+        var countryCode: String?
+        var channelNumber: Int?
+        var band: String?
+        var channelWidth: String?
+        var phyMode: String?
+        var securityText: String?
+    }
+
+    var wifiPowerOn: Bool?
+    var wifiInterfaceName: String?
+    /// `nil` when the Wi-Fi radio is off, absent, or not the active link.
+    var wireless: Wireless?
+    var ipv4: String?
+    var ipv6: String?
+    var router: String?
+    var dns: String?
+    var primaryInterfaceName: String?
 }
 
 @MainActor
@@ -66,15 +110,15 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
     var wifiStrengthBars: Int {
         guard kind == .wifi else { return kind == .offline ? 0 : 3 }
         guard let rssi, rssi < 0 else { return 3 }
-        if rssi >= -70 { return 3 }
-        if rssi >= -78 { return 2 }
-        if rssi >= -88 { return 1 }
-        return 0
+        return WiFiSignal.bars(rssi: rssi)
     }
 
     private let pathMonitor = NWPathMonitor()
     private let monitorQueue = DispatchQueue(label: "com.zechen.trinitybar.network")
     private let wlanWorkerQueue = DispatchQueue(label: "com.zechen.trinitybar.wlanworker", qos: .utility)
+    /// Dedicated serial queue for synchronous CoreWLAN / SCDynamicStore link reads so they never block the
+    /// main thread and never queue behind multi-second Wi-Fi scans on `wlanWorkerQueue`.
+    private let linkQueue = DispatchQueue(label: "com.zechen.trinitybar.link", qos: .utility)
     private let pingQueue = DispatchQueue(label: "com.zechen.trinitybar.ping", qos: .utility)
     private let locationManager = CLLocationManager()
     nonisolated(unsafe) private var liveSamplerTimer: Timer?
@@ -84,6 +128,12 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
     nonisolated(unsafe) private var scannedCWNets: [String: CWNetwork] = [:]
     private var prevBytes: (rx: UInt64, tx: UInt64, time: TimeInterval)?
     private var liveSampleTick: Int = 0
+    private var isRefreshingLink = false
+    private var linkRefreshPending = false
+    /// Optimistic Wi-Fi power state while `setPower` is in flight; link snapshots must not overwrite it.
+    private var pendingWiFiPower: Bool?
+    /// Bumped on every power change so snapshots read before the change never revert the toggle.
+    private var wifiPowerSeq: UInt64 = 0
 
     override init() {
         super.init()
@@ -126,18 +176,26 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
 
     func setWiFiPower(_ enabled: Bool) {
         wifiPowerOn = enabled
+        pendingWiFiPower = enabled
+        wifiPowerSeq &+= 1
         wlanWorkerQueue.async { [weak self] in
             if let iface = CWWiFiClient.shared().interface() {
                 try? iface.setPower(enabled)
             }
             Task { @MainActor [weak self] in
+                guard let self else { return }
+                // setPower has returned: invalidate snapshots read before it, then let fresh reads apply
+                // (a failed setPower simply reverts the toggle on the next refresh).
+                self.wifiPowerSeq &+= 1
+                if self.pendingWiFiPower == enabled { self.pendingWiFiPower = nil }
+
                 try? await Task.sleep(for: .milliseconds(500))
-                self?.refreshWifiAndIP()
+                self.refreshWifiAndIP()
                 if enabled {
-                    self?.scanNearbyNetworks()
+                    self.scanNearbyNetworks()
                 } else {
-                    self?.knownNetworks = []
-                    self?.otherNetworks = []
+                    self.knownNetworks = []
+                    self.otherNetworks = []
                 }
             }
         }
@@ -351,73 +409,103 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         }
     }
 
+    /// Reads CoreWLAN + SCDynamicStore link state on `linkQueue` (each CoreWLAN getter is a synchronous XPC
+    /// round-trip to `airportd`) and applies the result on the main actor. Overlapping requests coalesce.
     private func refreshWifiAndIP() {
-        if let iface = CWWiFiClient.shared().interface() {
-            let powerOn = iface.powerOn()
+        if isRefreshingLink {
+            linkRefreshPending = true
+            return
+        }
+        isRefreshingLink = true
+        let currentKind = kind
+        let powerSeq = wifiPowerSeq
+        linkQueue.async { [weak self] in
+            let snapshot = Self.readLinkSnapshot(currentKind: currentKind)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.applyLinkSnapshot(snapshot, powerSeq: powerSeq)
+                self.isRefreshingLink = false
+                if self.linkRefreshPending {
+                    self.linkRefreshPending = false
+                    self.refreshWifiAndIP()
+                }
+            }
+        }
+    }
+
+    private func applyLinkSnapshot(_ snapshot: LinkSnapshot, powerSeq: UInt64) {
+        if let powerOn = snapshot.wifiPowerOn, pendingWiFiPower == nil, powerSeq == wifiPowerSeq {
             setIfChanged(\.wifiPowerOn, to: powerOn)
-            if let bsd = iface.interfaceName {
-                setIfChanged(\.interfaceName, to: bsd)
-            }
-            if powerOn, (kind == .wifi || iface.rssiValue() < 0) {
-                let r = iface.rssiValue()
-                let nextRssi = r < 0 ? r : nil
-                setIfChanged(\.rssi, to: nextRssi)
-                let n = iface.noiseMeasurement()
-                setIfChanged(\.noiseDbm, to: n < 0 ? n : nil)
-
-                let tx = iface.transmitRate()
-                setIfChanged(\.linkRateMbps, to: (tx.isFinite && tx > 0) ? tx : nil)
-
-                let nextSSID = iface.ssid()
-                setIfChanged(\.ssid, to: nextSSID)
-                setIfChanged(\.bssid, to: iface.bssid())
-                setIfChanged(\.countryCode, to: iface.countryCode())
-
-                let ch = iface.wlanChannel()
-                setIfChanged(\.channelNumber, to: ch?.channelNumber)
-                setIfChanged(\.band, to: Self.displayBand(ch?.channelBand))
-                setIfChanged(\.channelWidth, to: Self.displayWidth(ch?.channelWidth))
-                setIfChanged(\.phyMode, to: Self.displayPHY(iface.activePHYMode()))
-                setIfChanged(\.securityText, to: Self.displaySecurity(iface.security()))
-
-                let auth = locationManager.authorizationStatus
-                setIfChanged(\.needsLocationPermission, to: nextRssi != nil && nextSSID == nil && auth != .authorizedAlways)
-            } else {
-                clearWirelessFields()
-            }
-        } else {
-            clearWirelessFields()
+        }
+        if let bsd = snapshot.wifiInterfaceName {
+            setIfChanged(\.interfaceName, to: bsd)
         }
 
-        let ipInfo = Self.readSystemNetworkDetails()
-        let fallbackIPs: (ipv4: String?, ipv6: String?)? = (ipInfo.ipv4 == nil || ipInfo.ipv6 == nil)
-            ? Self.readLocalIPAddresses()
-            : nil
-        setIfChanged(\.localIP, to: ipInfo.ipv4 ?? fallbackIPs?.ipv4 ?? "—")
-        setIfChanged(\.ipv6Address, to: ipInfo.ipv6 ?? fallbackIPs?.ipv6)
-        setIfChanged(\.routerIP, to: ipInfo.router)
-        setIfChanged(\.dnsServers, to: ipInfo.dns)
-        if let primaryIface = ipInfo.interfaceName {
+        let w = snapshot.wireless
+        setIfChanged(\.rssi, to: w?.rssi)
+        setIfChanged(\.noiseDbm, to: w?.noiseDbm)
+        setIfChanged(\.linkRateMbps, to: w?.linkRateMbps)
+        setIfChanged(\.ssid, to: w?.ssid)
+        setIfChanged(\.bssid, to: w?.bssid)
+        setIfChanged(\.countryCode, to: w?.countryCode)
+        setIfChanged(\.channelNumber, to: w?.channelNumber)
+        setIfChanged(\.band, to: w?.band)
+        setIfChanged(\.channelWidth, to: w?.channelWidth)
+        setIfChanged(\.phyMode, to: w?.phyMode)
+        setIfChanged(\.securityText, to: w?.securityText)
+        let needsLocation = w.map { $0.rssi != nil && $0.ssid == nil && locationManager.authorizationStatus != .authorizedAlways } ?? false
+        setIfChanged(\.needsLocationPermission, to: needsLocation)
+
+        setIfChanged(\.localIP, to: snapshot.ipv4 ?? "—")
+        setIfChanged(\.ipv6Address, to: snapshot.ipv6)
+        setIfChanged(\.routerIP, to: snapshot.router)
+        setIfChanged(\.dnsServers, to: snapshot.dns)
+        if let primaryIface = snapshot.primaryInterfaceName {
             setIfChanged(\.interfaceName, to: primaryIface)
         }
     }
 
-    private func clearWirelessFields() {
-        setIfChanged(\.rssi, to: nil)
-        setIfChanged(\.noiseDbm, to: nil)
-        setIfChanged(\.linkRateMbps, to: nil)
-        setIfChanged(\.ssid, to: nil)
-        setIfChanged(\.bssid, to: nil)
-        setIfChanged(\.band, to: nil)
-        setIfChanged(\.channelNumber, to: nil)
-        setIfChanged(\.channelWidth, to: nil)
-        setIfChanged(\.phyMode, to: nil)
-        setIfChanged(\.securityText, to: nil)
-        setIfChanged(\.countryCode, to: nil)
-        setIfChanged(\.needsLocationPermission, to: false)
+    nonisolated private static func readLinkSnapshot(currentKind: ConnectionKind) -> LinkSnapshot {
+        var snapshot = LinkSnapshot()
+
+        if let iface = CWWiFiClient.shared().interface() {
+            let powerOn = iface.powerOn()
+            snapshot.wifiPowerOn = powerOn
+            snapshot.wifiInterfaceName = iface.interfaceName
+            let r = iface.rssiValue()
+            if powerOn, currentKind == .wifi || r < 0 {
+                let n = iface.noiseMeasurement()
+                let tx = iface.transmitRate()
+                let ch = iface.wlanChannel()
+                snapshot.wireless = LinkSnapshot.Wireless(
+                    rssi: r < 0 ? r : nil,
+                    noiseDbm: n < 0 ? n : nil,
+                    linkRateMbps: (tx.isFinite && tx > 0) ? tx : nil,
+                    ssid: iface.ssid(),
+                    bssid: iface.bssid(),
+                    countryCode: iface.countryCode(),
+                    channelNumber: ch?.channelNumber,
+                    band: displayBand(ch?.channelBand),
+                    channelWidth: displayWidth(ch?.channelWidth),
+                    phyMode: displayPHY(iface.activePHYMode()),
+                    securityText: displaySecurity(iface.security())
+                )
+            }
+        }
+
+        let ipInfo = readSystemNetworkDetails()
+        let fallbackIPs: (ipv4: String?, ipv6: String?)? = (ipInfo.ipv4 == nil || ipInfo.ipv6 == nil)
+            ? readLocalIPAddresses()
+            : nil
+        snapshot.ipv4 = ipInfo.ipv4 ?? fallbackIPs?.ipv4
+        snapshot.ipv6 = ipInfo.ipv6 ?? fallbackIPs?.ipv6
+        snapshot.router = ipInfo.router
+        snapshot.dns = ipInfo.dns
+        snapshot.primaryInterfaceName = ipInfo.interfaceName
+        return snapshot
     }
 
-    private static func displayBand(_ band: CWChannelBand?) -> String? {
+    nonisolated private static func displayBand(_ band: CWChannelBand?) -> String? {
         guard let band else { return nil }
         switch band {
         case .band2GHz: return "2.4 GHz"
@@ -428,7 +516,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         }
     }
 
-    private static func displayWidth(_ width: CWChannelWidth?) -> String? {
+    nonisolated private static func displayWidth(_ width: CWChannelWidth?) -> String? {
         guard let width else { return nil }
         switch width {
         case .width20MHz: return "20 MHz"
@@ -440,7 +528,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         }
     }
 
-    private static func displayPHY(_ mode: CWPHYMode) -> String? {
+    nonisolated private static func displayPHY(_ mode: CWPHYMode) -> String? {
         switch mode {
         case .mode11a: return "802.11a"
         case .mode11b: return "802.11b"
@@ -454,7 +542,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         }
     }
 
-    private static func displaySecurity(_ security: CWSecurity) -> String? {
+    nonisolated private static func displaySecurity(_ security: CWSecurity) -> String? {
         switch security {
         case .none:
             return "Open"
@@ -481,10 +569,11 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
 
     // MARK: - SCDynamicStore Gateway, DNS, IPv4 & IPv6
 
-    private static let dynamicStore: SCDynamicStore? =
+    /// Only touched from `linkQueue`.
+    nonisolated(unsafe) private static let dynamicStore: SCDynamicStore? =
         SCDynamicStoreCreate(nil, "TrinityBar" as CFString, nil, nil)
 
-    private static func readSystemNetworkDetails() -> (
+    nonisolated private static func readSystemNetworkDetails() -> (
         interfaceName: String?,
         ipv4: String?,
         ipv6: String?,
@@ -581,7 +670,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
                 conn.stateUpdateHandler = nil
                 conn.cancel()
                 Task { @MainActor [weak self] in
-                    if self?.activePingConnection === conn { self?.activePingConnection = nil }
+                    self?.finishFailedPing(conn)
                 }
             default:
                 break
@@ -593,9 +682,17 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
             conn.stateUpdateHandler = nil
             conn.cancel()
             Task { @MainActor [weak self] in
-                if self?.activePingConnection === conn { self?.activePingConnection = nil }
+                self?.finishFailedPing(conn)
             }
         }
+    }
+
+    /// A probe that failed or timed out clears the stale latency, unless a newer probe already replaced it
+    /// (a successful probe detaches itself from `activePingConnection`, so its timeout is a no-op).
+    private func finishFailedPing(_ conn: NWConnection) {
+        guard activePingConnection === conn else { return }
+        activePingConnection = nil
+        setIfChanged(\.pingMs, to: nil)
     }
 
     /// Selects the user's configured public DNS server when available, falling back to Apple's global
@@ -633,7 +730,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         return true
     }
 
-    private static func readLocalIPAddresses() -> (ipv4: String?, ipv6: String?) {
+    nonisolated private static func readLocalIPAddresses() -> (ipv4: String?, ipv6: String?) {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return (nil, nil) }
         defer { freeifaddrs(ifaddr) }

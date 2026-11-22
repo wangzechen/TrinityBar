@@ -2,16 +2,33 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
+/// macOS System Settings deep links used across the dashboard.
+enum SystemSettingsPane: String {
+    case battery = "x-apple.systempreferences:com.apple.Battery-Settings.extension"
+    case network = "x-apple.systempreferences:com.apple.Network-Settings.extension"
+    case wifi = "x-apple.systempreferences:com.apple.wifi-settings-extension"
+    case sharing = "x-apple.systempreferences:com.apple.Sharing-Settings.extension"
+    case sound = "x-apple.systempreferences:com.apple.Sound-Settings.extension"
+    case bluetooth = "x-apple.systempreferences:com.apple.BluetoothSettings"
+
+    @MainActor
+    func open() {
+        if let url = URL(string: rawValue) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
+/// Root router. Observes only `AppSettings` (route + disclosure state); each summary section observes its own
+/// monitor so a 1.5s throughput tick re-evaluates only the network section instead of the whole panel.
 struct PopoverDashboardView: View {
-    @ObservedObject var battery: BatteryMonitor
-    @ObservedObject var network: NetworkMonitor
-    @ObservedObject var audio: AudioVolumeMonitor
-    @ObservedObject var caffeinate: CaffeinateManager
-    @ObservedObject var systemIcons: SystemIconsManager
+    let battery: BatteryMonitor
+    let network: NetworkMonitor
+    let audio: AudioVolumeMonitor
+    let caffeinate: CaffeinateManager
+    let systemIcons: SystemIconsManager
     @ObservedObject var settings: AppSettings
     var onDismissPanel: () -> Void
-
-    @Environment(\.colorScheme) private var colorScheme
 
     init(
         battery: BatteryMonitor,
@@ -31,30 +48,6 @@ struct PopoverDashboardView: View {
         self.onDismissPanel = onDismissPanel
     }
 
-    private var activeBottomDots: Int {
-        switch settings.bottomMode {
-        case .volumeDots: return audio.volumeDots
-        case .volumeArc, .none: return 0
-        }
-    }
-
-    private var emblemState: TrinityEmblemState {
-        TrinityEmblemState(
-            hasBattery: battery.hasBattery,
-            batteryPercent: battery.percentage,
-            isCharging: battery.isCharging,
-            isPluggedIn: battery.isPluggedIn,
-            isLowPowerMode: battery.isLowPowerMode,
-            showTopPercentage: settings.showTopPercentage,
-            connectionKind: network.kind,
-            wifiStrengthBars: network.wifiStrengthBars,
-            bottomMode: settings.bottomMode,
-            bottomDots: activeBottomDots,
-            bottomProgress: audio.effectiveProgress,
-            isDarkMenuBar: colorScheme == .dark
-        )
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Group {
@@ -66,9 +59,7 @@ struct PopoverDashboardView: View {
                         battery: battery,
                         settings: settings,
                         onBack: { settings.route = .summary },
-                        onOpenBatterySettings: {
-                            openSettingsAndDismiss("x-apple.systempreferences:com.apple.Battery-Settings.extension")
-                        }
+                        onOpenBatterySettings: { openSettingsAndDismiss(.battery) }
                     )
                 case .network:
                     NetworkDetailsPageView(
@@ -76,26 +67,17 @@ struct PopoverDashboardView: View {
                         settings: settings,
                         onBack: { settings.route = .summary },
                         onOpenNetworkSettings: {
-                            let target = network.kind == .ethernet
-                                ? "x-apple.systempreferences:com.apple.Network-Settings.extension"
-                                : "x-apple.systempreferences:com.apple.wifi-settings-extension"
-                            openSettingsAndDismiss(target)
+                            openSettingsAndDismiss(network.kind == .ethernet ? .network : .wifi)
                         },
-                        onOpenSharingSettings: {
-                            openSettingsAndDismiss("x-apple.systempreferences:com.apple.Sharing-Settings.extension")
-                        }
+                        onOpenSharingSettings: { openSettingsAndDismiss(.sharing) }
                     )
                 case .sound:
                     SoundDetailsPageView(
                         audio: audio,
                         settings: settings,
                         onBack: { settings.route = .summary },
-                        onOpenSoundSettings: {
-                            openSettingsAndDismiss("x-apple.systempreferences:com.apple.Sound-Settings.extension")
-                        },
-                        onOpenBluetoothSettings: {
-                            openSettingsAndDismiss("x-apple.systempreferences:com.apple.BluetoothSettings")
-                        }
+                        onOpenSoundSettings: { openSettingsAndDismiss(.sound) },
+                        onOpenBluetoothSettings: { openSettingsAndDismiss(.bluetooth) }
                     )
                 }
             }
@@ -108,62 +90,150 @@ struct PopoverDashboardView: View {
 
     private var summaryContent: some View {
         VStack(alignment: .leading, spacing: 11) {
-            batterySection
+            BatterySummarySection(
+                battery: battery,
+                onOpenDetails: {
+                    battery.refresh(includeDetailedSensors: true)
+                    settings.route = .battery
+                },
+                onOpenSettings: { openSettingsAndDismiss(.battery) }
+            )
             Divider().opacity(0.45)
 
-            networkSection
+            NetworkSummarySection(
+                network: network,
+                onOpenDetails: {
+                    network.refreshStaticTelemetry()
+                    if network.kind != .ethernet && network.wifiPowerOn {
+                        network.scanNearbyNetworks()
+                    }
+                    settings.route = .network
+                },
+                onOpenSettings: { openSettingsAndDismiss(.network) }
+            )
             Divider().opacity(0.45)
 
-            soundSection
+            SoundSummarySection(
+                audio: audio,
+                onOpenDetails: {
+                    audio.refresh()
+                    settings.route = .sound
+                },
+                onOpenSettings: { openSettingsAndDismiss(.sound) }
+            )
             Divider().opacity(0.45)
 
-            collapsedSettingsSection
+            SettingsDrawerSection(
+                settings: settings,
+                caffeinate: caffeinate,
+                systemIcons: systemIcons,
+                onDismissPanel: onDismissPanel
+            ) {
+                EmblemPreviewTile(battery: battery, network: network, audio: audio, settings: settings)
+            }
         }
     }
 
-    // MARK: - 1. Battery Module
+    private func openSettingsAndDismiss(_ pane: SystemSettingsPane) {
+        onDismissPanel()
+        pane.open()
+    }
+}
 
-    private var batterySection: some View {
+// MARK: - 1. Battery Module
+
+private struct BatterySummarySection: View {
+    @ObservedObject var battery: BatteryMonitor
+    let onOpenDetails: () -> Void
+    let onOpenSettings: () -> Void
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             SummaryModuleHeaderRow(
-                symbol: batterySymbolName,
+                symbol: symbolName,
                 symbolSize: 16,
-                accentColor: batteryAccentColor,
+                accentColor: accentColor,
                 title: battery.hasBattery ? "Battery · \(battery.percentage)%" : "Power · AC",
-                titleBadge: batteryWattageBadge,
-                subtitle: batterySubtitle,
+                titleBadge: wattageBadge,
+                subtitle: subtitle,
                 detailsHelp: "Battery Power Flow & Details",
                 settingsHelp: "Open Battery Settings",
-                onOpenDetails: openBatteryDetails,
-                onOpenSettings: {
-                    openSettingsAndDismiss("x-apple.systempreferences:com.apple.Battery-Settings.extension")
-                }
+                onOpenDetails: onOpenDetails,
+                onOpenSettings: onOpenSettings
             )
 
             PowerInfoBarSection(battery: battery)
         }
     }
 
-    private func openBatteryDetails() {
-        battery.refresh(includeDetailedSensors: true)
-        settings.route = .battery
+    private var wattageBadge: String? {
+        guard let w = battery.wattage, abs(w) >= 0.15 else { return nil }
+        return String(format: "%+.1fW", w)
     }
 
-    // MARK: - 2. Network Module
+    private var symbolName: String {
+        if !battery.hasBattery { return "powerplug.fill" }
+        if battery.isCharging { return "battery.100percent.bolt" }
+        if battery.percentage >= 88 { return "battery.100percent" }
+        if battery.percentage >= 63 { return "battery.75percent" }
+        if battery.percentage >= 38 { return "battery.50percent" }
+        if battery.percentage >= 18 { return "battery.25percent" }
+        return "battery.0percent"
+    }
 
-    private var networkSection: some View {
+    private var accentColor: Color {
+        switch battery.alertLevel {
+        case .charging: return .green
+        case .critical: return .red
+        case .low: return .yellow
+        case .normal: return .primary
+        }
+    }
+
+    private var subtitle: String {
+        if !battery.hasBattery {
+            return battery.isLowPowerMode ? "AC Power · Low Power Mode" : "Desktop AC Power"
+        }
+        var parts: [String] = []
+        if let mins = battery.timeRemainingMinutes {
+            let duration = DisplayFormat.hoursMinutes(mins)
+            parts.append(battery.isCharging ? "\(duration) to full" : "\(duration) left")
+        } else if battery.isCharging {
+            parts.append("Charging")
+        } else if battery.isPluggedIn {
+            parts.append("Connected to power")
+        } else {
+            parts.append(battery.isLowPowerMode ? "Low Power Mode" : "On battery")
+        }
+
+        if let health = battery.healthPercent {
+            parts.append("Health \(health)%")
+        }
+        if let cycles = battery.cycleCount {
+            parts.append("\(cycles) cyc")
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - 2. Network Module
+
+private struct NetworkSummarySection: View {
+    @ObservedObject var network: NetworkMonitor
+    let onOpenDetails: () -> Void
+    let onOpenSettings: () -> Void
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             SummaryModuleHeaderRow(
-                symbol: networkSymbolName,
-                accentColor: networkAccentColor,
-                title: networkTitle,
-                subtitle: networkSubtitle,
+                symbol: symbolName,
+                accentColor: isDown ? .red : .accentColor,
+                title: title,
+                subtitle: subtitle,
                 detailsHelp: "Wi-Fi Networks & Link Details",
                 settingsHelp: "Open Network Settings",
-                onOpenDetails: openNetworkDetails,
-                onOpenSettings: {
-                    openSettingsAndDismiss("x-apple.systempreferences:com.apple.Network-Settings.extension")
-                }
+                onOpenDetails: onOpenDetails,
+                onOpenSettings: onOpenSettings
             ) {
                 if network.kind != .ethernet {
                     Button {
@@ -183,51 +253,137 @@ struct PopoverDashboardView: View {
         }
     }
 
-    private func openNetworkDetails() {
-        network.refreshStaticTelemetry()
-        if network.kind != .ethernet && network.wifiPowerOn {
-            network.scanNearbyNetworks()
-        }
-        settings.route = .network
+    private var isDown: Bool {
+        network.kind == .offline || (network.kind == .wifi && !network.wifiPowerOn)
     }
 
-    // MARK: - 3. Sound Module
+    private var symbolName: String {
+        switch network.kind {
+        case .wifi: return network.wifiPowerOn ? "wifi" : "wifi.slash"
+        case .ethernet: return "cable.connector.horizontal"
+        case .other: return "network"
+        case .offline: return "wifi.slash"
+        }
+    }
 
-    private var soundSection: some View {
+    private var title: String {
+        switch network.kind {
+        case .wifi:
+            if !network.wifiPowerOn { return "Wi-Fi Off" }
+            if let ssid = network.ssid, !ssid.isEmpty { return ssid }
+            return "Wi-Fi"
+        case .ethernet:
+            return "Wired Ethernet"
+        case .other:
+            return "Connected"
+        case .offline:
+            return network.wifiPowerOn ? "No Network" : "Wi-Fi Off"
+        }
+    }
+
+    private var subtitle: String {
+        if isDown {
+            return network.wifiPowerOn ? "Not connected" : "Radio powered off"
+        }
+        var parts: [String] = []
+        if network.localIP != "—" && !network.localIP.isEmpty {
+            parts.append(network.localIP)
+        } else {
+            parts.append(network.interfaceName)
+        }
+        if network.kind == .wifi, let phy = network.phyMode, !phy.isEmpty {
+            parts.append(phy)
+        } else if network.kind == .wifi, let rate = network.linkRateMbps, rate > 0 {
+            parts.append("\(Int(round(rate))) Mbps")
+        } else if !parts.contains(network.interfaceName) {
+            parts.append(network.interfaceName)
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - 3. Sound Module
+
+private struct SoundSummarySection: View {
+    @ObservedObject var audio: AudioVolumeMonitor
+    let onOpenDetails: () -> Void
+    let onOpenSettings: () -> Void
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             SummaryModuleHeaderRow(
                 symbol: audio.outputSymbolName,
                 accentColor: audio.isMuted ? .red : .accentColor,
                 title: audio.outputDeviceName,
-                subtitle: soundSubtitle,
+                subtitle: subtitle,
                 detailsHelp: "Switch Sound Output & Input Devices",
                 settingsHelp: "Open Sound Settings",
-                onOpenDetails: openSoundDetails,
-                onOpenSettings: {
-                    openSettingsAndDismiss("x-apple.systempreferences:com.apple.Sound-Settings.extension")
-                }
+                onOpenDetails: onOpenDetails,
+                onOpenSettings: onOpenSettings
             )
 
             SoundInfoBarSection(audio: audio)
         }
     }
 
-    private func openSoundDetails() {
-        audio.refresh()
-        settings.route = .sound
+    private var subtitle: String {
+        if audio.isMuted {
+            return "\(audio.outputTransportLabel) · Muted"
+        }
+        if audio.outputDevices.count > 1 {
+            return "\(audio.outputTransportLabel) · \(audio.outputDevices.count) outputs"
+        }
+        return "\(audio.outputTransportLabel) · Active"
     }
+}
 
-    // MARK: - 4. Collapsible Settings Drawer
+// MARK: - 4. Collapsible Settings Drawer
 
-    private var collapsedSettingsSection: some View {
-        VStack(alignment: .leading, spacing: settings.summarySettingsExpanded ? 9 : 0) {
+/// Live emblem preview inside the settings drawer; the only summary view that depends on every monitor.
+private struct EmblemPreviewTile: View {
+    @ObservedObject var battery: BatteryMonitor
+    @ObservedObject var network: NetworkMonitor
+    @ObservedObject var audio: AudioVolumeMonitor
+    @ObservedObject var settings: AppSettings
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.08))
+                .frame(width: 28, height: 28)
+            TrinityEmblemView(
+                state: .current(
+                    battery: battery,
+                    network: network,
+                    audio: audio,
+                    settings: settings,
+                    isDarkMenuBar: colorScheme == .dark
+                ),
+                size: 20
+            )
+        }
+    }
+}
+
+private struct SettingsDrawerSection<Preview: View>: View {
+    @ObservedObject var settings: AppSettings
+    @ObservedObject var caffeinate: CaffeinateManager
+    @ObservedObject var systemIcons: SystemIconsManager
+    let onDismissPanel: () -> Void
+    @ViewBuilder let preview: () -> Preview
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let expanded = settings.summarySettingsExpanded
+        VStack(alignment: .leading, spacing: expanded ? 9 : 0) {
             CollapsibleSectionHeader(
                 title: "Settings",
                 symbol: "slider.horizontal.3",
-                isExpanded: settings.summarySettingsExpanded,
+                isExpanded: expanded,
                 onToggle: { settings.summarySettingsExpanded.toggle() }
             ) {
-                if caffeinate.isKeepingAwake && !settings.summarySettingsExpanded {
+                if caffeinate.isKeepingAwake && !expanded {
                     HStack(spacing: 3) {
                         Image(systemName: "cup.and.saucer.fill")
                             .font(.system(size: 9.5, weight: .semibold))
@@ -242,25 +398,20 @@ struct PopoverDashboardView: View {
                 }
             }
 
-            settingsDrawerCard
-                .opacity(settings.summarySettingsExpanded ? 1 : 0)
-                .offset(y: settings.summarySettingsExpanded ? 0 : -4)
-                .animation(.easeOut(duration: 0.18), value: settings.summarySettingsExpanded)
-                .allowsHitTesting(settings.summarySettingsExpanded)
-                .accessibilityHidden(!settings.summarySettingsExpanded)
-                .frame(height: settings.summarySettingsExpanded ? nil : 0, alignment: .top)
+            drawerCard
+                .opacity(expanded ? 1 : 0)
+                .offset(y: expanded ? 0 : -4)
+                .animation(.easeOut(duration: 0.18), value: expanded)
+                .allowsHitTesting(expanded)
+                .accessibilityHidden(!expanded)
+                .frame(height: expanded ? nil : 0, alignment: .top)
         }
     }
 
-    private var settingsDrawerCard: some View {
+    private var drawerCard: some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(width: 28, height: 28)
-                    TrinityEmblemView(state: emblemState, size: 20)
-                }
+                preview()
 
                 Text("Volume Bar")
                     .font(.system(size: 11.5))
@@ -279,15 +430,15 @@ struct PopoverDashboardView: View {
                 .frame(width: 164)
             }
 
-            settingsToggleRow("Top % Number", isOn: $settings.showTopPercentage)
+            toggleRow("Top % Number", isOn: $settings.showTopPercentage)
 
-            settingsToggleRow(
+            toggleRow(
                 "Icon Volume Control",
                 isOn: $settings.iconVolumeControl,
                 help: "Scroll on the menu bar icon to adjust volume, and ⌥-Click to mute"
             )
 
-            settingsToggleRow(
+            toggleRow(
                 "Hide Native Icons",
                 isOn: $systemIcons.autoHideEnabled,
                 help: "Hide native macOS Wi-Fi, Battery, and Volume icons while TrinityBar is running"
@@ -321,55 +472,7 @@ struct PopoverDashboardView: View {
 
             Divider().opacity(0.35)
 
-            HStack(spacing: 6) {
-                Button {
-                    caffeinate.toggle()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: caffeinate.isKeepingAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(keepAwakeButtonTitle)
-                            .font(.system(size: 11.5, weight: .medium))
-                            .monospacedDigit()
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(caffeinate.isKeepingAwake ? Color.orange : .secondary)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Prevent Mac display sleep")
-
-                Spacer(minLength: 4)
-
-                HStack(spacing: 3) {
-                    ForEach(CaffeinateDuration.allCases) { duration in
-                        let isSelected = caffeinate.selectedDuration == duration
-                        Button {
-                            caffeinate.activate(duration: duration)
-                        } label: {
-                            Text(duration.shortLabel)
-                                .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
-                                .foregroundStyle(
-                                    isSelected
-                                        ? (caffeinate.isKeepingAwake ? Color.orange : Color.primary)
-                                        : Color.secondary
-                                )
-                                .padding(.horizontal, 5.5)
-                                .padding(.vertical, 2.5)
-                                .background(
-                                    isSelected
-                                        ? (caffeinate.isKeepingAwake
-                                            ? Color.orange.opacity(0.18)
-                                            : Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09))
-                                        : Color.clear,
-                                    in: Capsule(style: .continuous)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .help(duration == .indefinite ? "Keep awake indefinitely" : "Keep awake for \(duration.shortLabel)")
-                    }
-                }
-            }
+            keepAwakeRow
 
             HStack {
                 Spacer()
@@ -392,7 +495,59 @@ struct PopoverDashboardView: View {
         )
     }
 
-    private func settingsToggleRow(_ title: String, isOn: Binding<Bool>, help: String? = nil) -> some View {
+    private var keepAwakeRow: some View {
+        HStack(spacing: 6) {
+            Button {
+                caffeinate.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: caffeinate.isKeepingAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(keepAwakeButtonTitle)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
+                .foregroundStyle(caffeinate.isKeepingAwake ? Color.orange : .secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Prevent Mac display sleep")
+
+            Spacer(minLength: 4)
+
+            HStack(spacing: 3) {
+                ForEach(CaffeinateDuration.allCases) { duration in
+                    let isSelected = caffeinate.selectedDuration == duration
+                    Button {
+                        caffeinate.activate(duration: duration)
+                    } label: {
+                        Text(duration.shortLabel)
+                            .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
+                            .foregroundStyle(
+                                isSelected
+                                    ? (caffeinate.isKeepingAwake ? Color.orange : Color.primary)
+                                    : Color.secondary
+                            )
+                            .padding(.horizontal, 5.5)
+                            .padding(.vertical, 2.5)
+                            .background(
+                                isSelected
+                                    ? (caffeinate.isKeepingAwake
+                                        ? Color.orange.opacity(0.18)
+                                        : Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.09))
+                                    : Color.clear,
+                                in: Capsule(style: .continuous)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(duration == .indefinite ? "Keep awake indefinitely" : "Keep awake for \(duration.shortLabel)")
+                }
+            }
+        }
+    }
+
+    private func toggleRow(_ title: String, isOn: Binding<Bool>, help: String? = nil) -> some View {
         HStack {
             Text(title)
                 .font(.system(size: 11.5))
@@ -405,134 +560,11 @@ struct PopoverDashboardView: View {
         }
     }
 
-    // MARK: - Formatting Helpers
-
     private var keepAwakeButtonTitle: String {
         guard caffeinate.isKeepingAwake else { return "Keep Awake" }
         if let rem = caffeinate.remainingBadgeText {
             return "Awake · \(rem)"
         }
         return "Awake On"
-    }
-
-    private var batteryWattageBadge: String? {
-        guard let w = battery.wattage, abs(w) >= 0.15 else { return nil }
-        return String(format: "%+.1fW", w)
-    }
-
-    private var batterySymbolName: String {
-        if !battery.hasBattery { return "powerplug.fill" }
-        if battery.isCharging { return "battery.100percent.bolt" }
-        if battery.percentage >= 88 { return "battery.100percent" }
-        if battery.percentage >= 63 { return "battery.75percent" }
-        if battery.percentage >= 38 { return "battery.50percent" }
-        if battery.percentage >= 18 { return "battery.25percent" }
-        return "battery.0percent"
-    }
-
-    private var batteryAccentColor: Color {
-        if !battery.hasBattery { return .primary }
-        if battery.isCharging || battery.isPluggedIn { return .green }
-        if battery.percentage <= 15 { return .red }
-        if battery.isLowPowerMode || battery.percentage <= 20 { return .yellow }
-        return .primary
-    }
-
-    private var batterySubtitle: String {
-        if !battery.hasBattery {
-            return battery.isLowPowerMode ? "AC Power · Low Power Mode" : "Desktop AC Power"
-        }
-        var parts: [String] = []
-        if let mins = battery.timeRemainingMinutes {
-            let h = mins / 60
-            let m = mins % 60
-            if battery.isCharging {
-                parts.append(h > 0 ? "\(h)h \(m)m to full" : "\(m)m to full")
-            } else {
-                parts.append(h > 0 ? "\(h)h \(m)m left" : "\(m)m left")
-            }
-        } else if battery.isCharging {
-            parts.append("Charging")
-        } else if battery.isPluggedIn {
-            parts.append("Connected to power")
-        } else {
-            parts.append(battery.isLowPowerMode ? "Low Power Mode" : "On battery")
-        }
-
-        if let health = battery.healthPercent {
-            parts.append("Health \(health)%")
-        }
-        if let cycles = battery.cycleCount {
-            parts.append("\(cycles) cyc")
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private var networkSymbolName: String {
-        switch network.kind {
-        case .wifi: return network.wifiPowerOn ? "wifi" : "wifi.slash"
-        case .ethernet: return "cable.connector.horizontal"
-        case .other: return "network"
-        case .offline: return "wifi.slash"
-        }
-    }
-
-    private var networkAccentColor: Color {
-        if network.kind == .offline || (network.kind == .wifi && !network.wifiPowerOn) {
-            return .red
-        }
-        return .accentColor
-    }
-
-    private var networkTitle: String {
-        switch network.kind {
-        case .wifi:
-            if !network.wifiPowerOn { return "Wi-Fi Off" }
-            if let ssid = network.ssid, !ssid.isEmpty { return ssid }
-            return "Wi-Fi"
-        case .ethernet:
-            return "Wired Ethernet"
-        case .other:
-            return "Connected"
-        case .offline:
-            return network.wifiPowerOn ? "No Network" : "Wi-Fi Off"
-        }
-    }
-
-    private var networkSubtitle: String {
-        if network.kind == .offline || (network.kind == .wifi && !network.wifiPowerOn) {
-            return network.wifiPowerOn ? "Not connected" : "Radio powered off"
-        }
-        var parts: [String] = []
-        if network.localIP != "—" && !network.localIP.isEmpty {
-            parts.append(network.localIP)
-        } else {
-            parts.append(network.interfaceName)
-        }
-        if network.kind == .wifi, let phy = network.phyMode, !phy.isEmpty {
-            parts.append(phy)
-        } else if network.kind == .wifi, let rate = network.linkRateMbps, rate > 0 {
-            parts.append("\(Int(round(rate))) Mbps")
-        } else if !parts.contains(network.interfaceName) {
-            parts.append(network.interfaceName)
-        }
-        return parts.joined(separator: " · ")
-    }
-
-    private var soundSubtitle: String {
-        if audio.isMuted {
-            return "\(audio.outputTransportLabel) · Muted"
-        }
-        if audio.outputDevices.count > 1 {
-            return "\(audio.outputTransportLabel) · \(audio.outputDevices.count) outputs"
-        }
-        return "\(audio.outputTransportLabel) · Active"
-    }
-
-    private func openSettingsAndDismiss(_ urlString: String) {
-        onDismissPanel()
-        if let url = URL(string: urlString) {
-            NSWorkspace.shared.open(url)
-        }
     }
 }

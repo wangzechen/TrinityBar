@@ -4,8 +4,8 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-VERSION="1.1.1"
-BUILD_NUMBER="3"
+VERSION="1.1.2"
+BUILD_NUMBER="4"
 DIST_DIR="$PROJECT_DIR/dist"
 APP_DIR="$DIST_DIR/TrinityBar.app"
 CONTENTS_DIR="$APP_DIR/Contents"

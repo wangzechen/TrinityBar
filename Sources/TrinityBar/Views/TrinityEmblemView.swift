@@ -16,33 +16,34 @@ struct TrinityEmblemState: Equatable, Hashable {
     var bottomDots: Int // 0...4
     var bottomProgress: Double // 0.0...1.0 (for Volume Arc)
     var isDarkMenuBar: Bool
+}
 
-    init(
-        hasBattery: Bool = true,
-        batteryPercent: Int,
-        isCharging: Bool,
-        isPluggedIn: Bool,
-        isLowPowerMode: Bool,
-        showTopPercentage: Bool,
-        connectionKind: ConnectionKind,
-        wifiStrengthBars: Int,
-        bottomMode: BottomIndicatorMode,
-        bottomDots: Int,
-        bottomProgress: Double,
+extension TrinityEmblemState {
+    /// Single source of truth for mapping live monitor state onto the emblem, shared by the menu bar icon
+    /// and the in-panel preview tile. Arc progress is quantized to 2% steps to avoid redundant re-renders.
+    @MainActor
+    static func current(
+        battery: BatteryMonitor,
+        network: NetworkMonitor,
+        audio: AudioVolumeMonitor,
+        settings: AppSettings,
         isDarkMenuBar: Bool
-    ) {
-        self.hasBattery = hasBattery
-        self.batteryPercent = batteryPercent
-        self.isCharging = isCharging
-        self.isPluggedIn = isPluggedIn
-        self.isLowPowerMode = isLowPowerMode
-        self.showTopPercentage = showTopPercentage
-        self.connectionKind = connectionKind
-        self.wifiStrengthBars = wifiStrengthBars
-        self.bottomMode = bottomMode
-        self.bottomDots = bottomDots
-        self.bottomProgress = bottomProgress
-        self.isDarkMenuBar = isDarkMenuBar
+    ) -> TrinityEmblemState {
+        let mode = settings.bottomMode
+        return TrinityEmblemState(
+            hasBattery: battery.hasBattery,
+            batteryPercent: battery.percentage,
+            isCharging: battery.isCharging,
+            isPluggedIn: battery.isPluggedIn,
+            isLowPowerMode: battery.isLowPowerMode,
+            showTopPercentage: settings.showTopPercentage,
+            connectionKind: network.kind,
+            wifiStrengthBars: network.wifiStrengthBars,
+            bottomMode: mode,
+            bottomDots: mode == .volumeDots ? audio.volumeDots : 0,
+            bottomProgress: mode == .volumeArc ? (audio.effectiveProgress * 50.0).rounded() / 50.0 : 0.0,
+            isDarkMenuBar: isDarkMenuBar
+        )
     }
 }
 
@@ -97,7 +98,7 @@ enum TrinityStatusIconRenderer {
     private static let volumeArcEndDeg: CGFloat = 59.0
     private static let volumeArcStrokeWidth: CGFloat = 7.3
 
-    public static func contentFrame(in bounds: CGRect, contentSize: CGSize) -> CGRect {
+    static func contentFrame(in bounds: CGRect, contentSize: CGSize) -> CGRect {
         CGRect(
             x: bounds.midX - contentSize.width / 2.0,
             y: bounds.midY - contentSize.height / 2.0,
@@ -106,7 +107,7 @@ enum TrinityStatusIconRenderer {
         )
     }
 
-    public static func menuBarLayers(
+    static func menuBarLayers(
         state: TrinityEmblemState,
         size: CGFloat,
         scale: CGFloat,
@@ -142,12 +143,30 @@ enum TrinityStatusIconRenderer {
         return MenuBarLayers(templateBase: baseImage, chromaticOverlay: overlayCG)
     }
 
-    public static func compositeImage(
+    /// Single-entry cache: the in-panel preview tile re-evaluates on unrelated telemetry ticks, but the
+    /// emblem state itself changes rarely.
+    private static var compositeCache: (
+        state: TrinityEmblemState,
+        size: CGFloat,
+        scale: CGFloat,
+        appearanceName: NSAppearance.Name?,
+        image: NSImage
+    )?
+
+    static func compositeImage(
         state: TrinityEmblemState,
         size: CGFloat,
         scale: CGFloat = 2.0,
         appearance: NSAppearance? = nil
     ) -> NSImage? {
+        let appearanceName = appearance?.name
+        if let cached = compositeCache,
+           cached.state == state,
+           cached.size == size,
+           cached.scale == scale,
+           cached.appearanceName == appearanceName {
+            return cached.image
+        }
         guard let cg = renderCGImage(
             state: state,
             size: size,
@@ -160,12 +179,22 @@ enum TrinityStatusIconRenderer {
         }
         let img = NSImage(cgImage: cg, size: NSSize(width: size, height: size))
         img.isTemplate = false
+        compositeCache = (state, size, scale, appearanceName, img)
         return img
     }
 
+    private static func alertLevel(_ state: TrinityEmblemState) -> BatteryAlertLevel {
+        .resolve(
+            hasBattery: state.hasBattery,
+            percent: state.batteryPercent,
+            isCharging: state.isCharging,
+            isPluggedIn: state.isPluggedIn,
+            isLowPowerMode: state.isLowPowerMode
+        )
+    }
+
     private static func isRingChromatic(_ state: TrinityEmblemState) -> Bool {
-        guard state.hasBattery else { return false }
-        return state.batteryPercent < 20 || state.isLowPowerMode || state.isCharging || state.isPluggedIn
+        alertLevel(state) != .normal
     }
 
     private static func resolvedPalette(isDark: Bool, appearance: NSAppearance?) -> (
@@ -281,10 +310,12 @@ enum TrinityStatusIconRenderer {
 
         let ringIsColor = isRingChromatic(state)
         let ringFillColor: CGColor = {
-            if state.batteryPercent < 20 { return criticalColor }
-            if state.isLowPowerMode { return lowPowerColor }
-            if state.isCharging || state.isPluggedIn { return chargingColor }
-            return foreground
+            switch alertLevel(state) {
+            case .charging: return chargingColor
+            case .critical: return criticalColor
+            case .low: return lowPowerColor
+            case .normal: return foreground
+            }
         }()
 
         // 1a. Battery Ring Track (template layer)
@@ -412,17 +443,9 @@ enum TrinityStatusIconRenderer {
         let networkCenter = CGPoint(x: ringCenter.x, y: ringCenter.y + 0.5)
         switch state.connectionKind {
         case .wifi, .other:
-            let variableValue: Double = {
-                switch state.wifiStrengthBars {
-                case 3: return 1.0
-                case 2: return 0.66
-                case 1: return 0.33
-                default: return 0.0
-                }
-            }()
             drawSymbol(
                 name: "wifi",
-                variableValue: variableValue,
+                variableValue: WiFiSignal.variableValue(bars: state.wifiStrengthBars),
                 pointSize: 50.0,
                 weight: .semibold,
                 center: networkCenter,

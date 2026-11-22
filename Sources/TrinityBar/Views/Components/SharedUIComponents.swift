@@ -1,6 +1,17 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Display Formatting
+
+enum DisplayFormat {
+    /// `95` -> `"1h 35m"`, `40` -> `"40m"`.
+    static func hoursMinutes(_ totalMinutes: Int) -> String {
+        let h = totalMinutes / 60
+        let m = totalMinutes % 60
+        return h > 0 ? "\(h)h \(m)m" : "\(m)m"
+    }
+}
+
 // MARK: - Glass Card Surface Helper
 
 extension View {

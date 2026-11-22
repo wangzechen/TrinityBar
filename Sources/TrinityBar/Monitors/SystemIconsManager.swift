@@ -37,11 +37,20 @@ final class SystemIconsManager: ObservableObject {
         ManagedControlCenterItem(moduleKey: "Sound", snapshotTag: "Sound", hiddenHostCode: 8)
     ]
 
+    /// Separate snapshot slot for the native Sound icon when it is force-shown with Hide Native Icons OFF
+    /// (Volume Bar == None), so it never clobbers the main auto-hide snapshot.
+    private static let forcedSoundItem = ManagedControlCenterItem(
+        moduleKey: "Sound",
+        snapshotTag: "SoundForced",
+        hiddenHostCode: 8
+    )
+
     private enum Keys {
         static let autoHideEnabledV2 = "TrinityBar.autoHideSystemIcons.v2"
         static let isCurrentlyHidden = "TrinityBar.systemIconsCurrentlyHidden"
         static let hasSnapshot = "TrinityBar.hasControlCenterSnapshot"
         static let hasSoundSnapshot = "TrinityBar.hasSoundControlCenterSnapshot"
+        static let soundForcedVisible = "TrinityBar.soundForcedVisibleByApp"
     }
 
     private let domain = "com.apple.controlcenter" as CFString
@@ -79,16 +88,18 @@ final class SystemIconsManager: ObservableObject {
     }
 
     func applyOnLaunchIfNeeded() {
-        if autoHideEnabled {
-            applyCurrentPolicy()
-        } else if isCurrentlyHiddenByApp {
-            restoreSystemIcons()
-        }
+        // Also recovers a crash-leftover hidden / force-shown state when Hide Native Icons is OFF.
+        applyCurrentPolicy()
     }
 
     func restoreOnTerminateIfNeeded() {
-        guard isCurrentlyHiddenByApp else { return }
-        restoreSystemIcons()
+        if isCurrentlyHiddenByApp {
+            restoreSystemIcons()
+        }
+        if releaseForcedSoundIfNeeded() {
+            syncPreferences()
+            restartControlCenter()
+        }
     }
 
     /// Applies the desired visibility for `WiFi`, `Battery`, and `Sound` based on `(autoHideEnabled, includesVolumeInEmblem)`.
@@ -99,20 +110,24 @@ final class SystemIconsManager: ObservableObject {
             if isCurrentlyHiddenByApp {
                 restoreSystemIcons()
             }
-            // When Hide Native Icons is OFF, only surface native Sound if Volume Bar is None
-            // without touching or snapshotting Wi-Fi / Battery.
-            if !includesVolumeInEmblem,
-               let soundItem = Self.managedItems.first(where: { $0.moduleKey == "Sound" }),
-               applyDefaultVisible(soundItem) {
+            // When Hide Native Icons is OFF, only surface native Sound while Volume Bar is None (snapshotting
+            // the user's own Sound setting first), and give it back once the emblem shows volume again.
+            let changed = includesVolumeInEmblem ? releaseForcedSoundIfNeeded() : forceSoundVisibleIfNeeded()
+            if changed {
                 syncPreferences()
                 restartControlCenter()
             }
             return
         }
 
+        // Hand back any force-shown Sound icon before snapshotting, so the snapshot holds the user's real layout.
+        let releasedForcedSound = releaseForcedSoundIfNeeded()
+        if releasedForcedSound {
+            syncPreferences()
+        }
         captureSnapshotsIfNeeded()
 
-        var changed = false
+        var changed = releasedForcedSound
         for item in Self.managedItems {
             if item.moduleKey == "Sound" && !includesVolumeInEmblem {
                 // Volume Bar == None -> explicitly show native Sound icon in the macOS status bar.
@@ -151,6 +166,31 @@ final class SystemIconsManager: ObservableObject {
             syncPreferences()
             restartControlCenter()
         }
+    }
+
+    // MARK: - Forced Native Sound Icon (Hide Native Icons OFF + Volume Bar None)
+
+    private var isSoundForcedVisible: Bool {
+        UserDefaults.standard.bool(forKey: Keys.soundForcedVisible)
+    }
+
+    /// Returns `true` when Control Center preferences were changed.
+    private func forceSoundVisibleIfNeeded() -> Bool {
+        let item = Self.forcedSoundItem
+        if !isSoundForcedVisible {
+            captureItemSnapshot(item)
+            UserDefaults.standard.set(true, forKey: Keys.soundForcedVisible)
+        }
+        return applyDefaultVisible(item)
+    }
+
+    /// Restores the user's own Sound icon setting if TrinityBar force-showed it. Returns `true` when preferences changed.
+    @discardableResult
+    private func releaseForcedSoundIfNeeded() -> Bool {
+        guard isSoundForcedVisible else { return false }
+        let changed = restoreItemSnapshot(Self.forcedSoundItem)
+        UserDefaults.standard.set(false, forKey: Keys.soundForcedVisible)
+        return changed
     }
 
     // MARK: - Snapshot & CFPreferences Helpers

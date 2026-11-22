@@ -128,9 +128,7 @@ struct BatteryDetailsPageView: View {
 
     private var timeEstimateValue: String {
         if let mins = battery.timeRemainingMinutes {
-            let h = mins / 60
-            let m = mins % 60
-            return h > 0 ? "\(h)h \(m)m" : "\(m)m"
+            return DisplayFormat.hoursMinutes(mins)
         }
         if battery.isPluggedIn && !battery.isCharging && battery.percentage >= 98 {
             return "Fully Charged"

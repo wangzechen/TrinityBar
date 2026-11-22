@@ -39,7 +39,10 @@ final class AudioVolumeMonitor: ObservableObject {
     }
 
     nonisolated(unsafe) private var observedDeviceID: AudioDeviceID = kAudioObjectUnknown
-    nonisolated(unsafe) private var listenerBlock: AudioObjectPropertyListenerBlock?
+    /// Device topology / default-device changes -> full device enumeration.
+    nonisolated(unsafe) private var systemListenerBlock: AudioObjectPropertyListenerBlock?
+    /// Volume / mute changes on the active output -> lightweight scalar refresh only.
+    nonisolated(unsafe) private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var softMutedRestoreVolume: Float?
 
     nonisolated private static let systemSelectors: [AudioObjectPropertySelector] = [
@@ -59,13 +62,14 @@ final class AudioVolumeMonitor: ObservableObject {
     }
 
     deinit {
-        guard let block = listenerBlock else { return }
         let systemObj = AudioObjectID(kAudioObjectSystemObject)
-        for selector in Self.systemSelectors {
-            var addr = Self.propertyAddress(selector)
-            AudioObjectRemovePropertyListenerBlock(systemObj, &addr, DispatchQueue.main, block)
+        if let block = systemListenerBlock {
+            for selector in Self.systemSelectors {
+                var addr = Self.propertyAddress(selector)
+                AudioObjectRemovePropertyListenerBlock(systemObj, &addr, DispatchQueue.main, block)
+            }
         }
-        if observedDeviceID != kAudioObjectUnknown {
+        if let block = deviceListenerBlock, observedDeviceID != kAudioObjectUnknown {
             for selector in Self.outputDeviceSelectors {
                 var addr = Self.propertyAddress(selector, scope: kAudioDevicePropertyScopeOutput)
                 AudioObjectRemovePropertyListenerBlock(observedDeviceID, &addr, DispatchQueue.main, block)
@@ -74,23 +78,29 @@ final class AudioVolumeMonitor: ObservableObject {
     }
 
     private func observeSystemAudioChanges() {
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        let systemBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             MainActor.assumeIsolated {
                 self?.refresh()
             }
         }
-        listenerBlock = block
+        let deviceBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            MainActor.assumeIsolated {
+                self?.refreshVolumeAndMute()
+            }
+        }
+        systemListenerBlock = systemBlock
+        deviceListenerBlock = deviceBlock
 
         let systemObj = AudioObjectID(kAudioObjectSystemObject)
         for selector in Self.systemSelectors {
             var addr = Self.propertyAddress(selector)
-            AudioObjectAddPropertyListenerBlock(systemObj, &addr, DispatchQueue.main, block)
+            AudioObjectAddPropertyListenerBlock(systemObj, &addr, DispatchQueue.main, systemBlock)
         }
         attachDeviceListenersIfNeeded()
     }
 
     private func attachDeviceListenersIfNeeded() {
-        guard let block = listenerBlock else { return }
+        guard let block = deviceListenerBlock else { return }
         let deviceID = Self.defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice)
         guard deviceID != kAudioObjectUnknown, deviceID != observedDeviceID else { return }
 
@@ -110,6 +120,7 @@ final class AudioVolumeMonitor: ObservableObject {
         }
     }
 
+    /// Full refresh: re-enumerates every audio device plus the active output's volume / mute state.
     func refresh() {
         attachDeviceListenersIfNeeded()
 
@@ -121,8 +132,7 @@ final class AudioVolumeMonitor: ObservableObject {
         var ins: [AudioDeviceItem] = []
 
         for id in allIDs {
-            if Self.isHiddenDevice(id) { continue }
-            guard let name = Self.readDeviceName(id) else { continue }
+            guard let name = Self.readDeviceName(id), !Self.isHiddenDevice(id, name: name) else { continue }
             let transport = Self.readTransportType(id)
             let transportText = Self.transportLabel(for: transport, name: name)
             let sampleRate = Self.readNominalSampleRate(id)
@@ -183,6 +193,14 @@ final class AudioVolumeMonitor: ObservableObject {
             if outputSampleRateHz != sr { outputSampleRateHz = sr }
             if outputChannelCount != ch { outputChannelCount = ch }
         }
+
+        refreshVolumeAndMute(deviceID: currentOutID)
+    }
+
+    /// Lightweight refresh of only the active output's volume and mute scalars (fired on every volume tick).
+    private func refreshVolumeAndMute(deviceID: AudioDeviceID? = nil) {
+        let currentOutID = deviceID ?? Self.defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice)
+        guard currentOutID != kAudioObjectUnknown else { return }
 
         if let vol: Float32 = Self.readScalar(
             currentOutID,
@@ -259,6 +277,12 @@ final class AudioVolumeMonitor: ObservableObject {
         ) {
             volume = clamped
         }
+    }
+
+    /// Relative volume step used by scroll gestures; never lowers volume while muted.
+    func adjustVolume(by delta: Float) {
+        if isMuted && delta < 0 { return }
+        setVolume(volume + delta)
     }
 
     func toggleMute() {
@@ -388,11 +412,9 @@ final class AudioVolumeMonitor: ObservableObject {
         return true
     }
 
-    private static func isHiddenDevice(_ deviceID: AudioDeviceID) -> Bool {
+    private static func isHiddenDevice(_ deviceID: AudioDeviceID, name: String) -> Bool {
+        if name.hasPrefix("CADefaultDeviceAggregate") { return true }
         if let hidden: UInt32 = readScalar(deviceID, selector: kAudioDevicePropertyIsHidden, initial: 0), hidden != 0 {
-            return true
-        }
-        if let name = readDeviceName(deviceID), name.hasPrefix("CADefaultDeviceAggregate") {
             return true
         }
         return false

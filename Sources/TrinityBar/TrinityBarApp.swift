@@ -35,9 +35,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarLocalScrollMonitor: Any?
     private var statusBarGlobalScrollMonitor: Any?
     private var lastRenderedKey: RenderedStatusIconKey?
+    private var lastAccessibilityValue: String?
     private var lastPlaceholderSize: CGFloat = 0
-    private var sigTermSource: DispatchSourceSignal?
-    private var sigIntSource: DispatchSourceSignal?
+    private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -50,7 +50,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.target = self
             button.action = #selector(handleStatusBarClick(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            button.toolTip = "TrinityBar — Battery, Network & Sound (Scroll: Volume, ⌥-Click: Mute)"
             button.setAccessibilityLabel("TrinityBar")
 
             let baseView = UnscaledStatusBarImageView()
@@ -116,10 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return route == .summary || route == .sound
         }
         floatingPanel.onScrollDeltaY = { [weak self] delta in
-            guard let self else { return }
-            if self.audio.isMuted && delta < 0 { return }
-            let next = self.audio.volume + Float(delta)
-            self.audio.setVolume(next)
+            self?.audio.adjustVolume(by: Float(delta))
         }
         self.panel = floatingPanel
 
@@ -138,6 +134,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
+        restoreSystemStateBeforeExit()
+    }
+
+    /// Releases the keep-awake assertion and restores native Control Center icons (shared by normal quit and SIGTERM / SIGINT).
+    private func restoreSystemStateBeforeExit() {
         caffeinate.setKeepAwake(false)
         systemIcons.restoreOnTerminateIfNeeded()
     }
@@ -155,8 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
         if let scaled = StatusFloatingPanel.scaledVolumeDelta(dy: dy, isPrecise: isPrecise) {
-            if audio.isMuted && scaled < 0 { return true }
-            audio.setVolume(audio.volume + Float(scaled))
+            audio.adjustVolume(by: Float(scaled))
         }
         return true
     }
@@ -166,11 +166,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem?.button?.toolTip = "TrinityBar — Battery, Network & Sound (Scroll: Volume, ⌥-Click: Mute)"
             statusItem?.button?.setAccessibilityHelp("Click to open dashboard, scroll to adjust volume, or Option-click to mute.")
             if statusBarGlobalScrollMonitor == nil {
+                // Global monitor handlers are delivered on the main thread; handle inline so system-wide scrolling
+                // elsewhere costs only a rect check instead of a Task hop per event.
                 statusBarGlobalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
                     let dy = event.scrollingDeltaY
                     let isPrecise = event.hasPreciseScrollingDeltas
                     let mouseLoc = NSEvent.mouseLocation
-                    Task { @MainActor [weak self] in
+                    MainActor.assumeIsolated {
                         _ = self?.handleStatusBarScroll(dy: dy, isPrecise: isPrecise, mouseLocation: mouseLoc)
                     }
                 }
@@ -244,30 +246,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupSignalHandlers() {
-        signal(SIGTERM, SIG_IGN)
-        signal(SIGINT, SIG_IGN)
-
-        let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        termSource.setEventHandler { [weak self] in
-            MainActor.assumeIsolated {
-                self?.caffeinate.setKeepAwake(false)
-                self?.systemIcons.restoreOnTerminateIfNeeded()
-                exit(0)
+        signalSources = [SIGTERM, SIGINT].map { sig in
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.restoreSystemStateBeforeExit()
+                    exit(0)
+                }
             }
+            source.resume()
+            return source
         }
-        termSource.resume()
-        self.sigTermSource = termSource
-
-        let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        intSource.setEventHandler { [weak self] in
-            MainActor.assumeIsolated {
-                self?.caffeinate.setKeepAwake(false)
-                self?.systemIcons.restoreOnTerminateIfNeeded()
-                exit(0)
-            }
-        }
-        intSource.resume()
-        self.sigIntSource = intSource
     }
 
     private func bindStateChanges() {
@@ -346,36 +336,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusIcon(force: Bool) {
         guard let button = statusItem?.button else { return }
-        button.setAccessibilityValue(accessibilityStatusSummary())
+        let summary = accessibilityStatusSummary()
+        if summary != lastAccessibilityValue {
+            button.setAccessibilityValue(summary)
+            lastAccessibilityValue = summary
+        }
 
-        let activeDots: Int = {
-            switch settings.bottomMode {
-            case .volumeDots: return audio.volumeDots
-            case .volumeArc, .none: return 0
-            }
-        }()
-
-        let quantizedProgress: Double = {
-            switch settings.bottomMode {
-            case .volumeArc: return (audio.effectiveProgress * 50.0).rounded() / 50.0
-            case .volumeDots, .none: return 0.0
-            }
-        }()
         let targetSize = AppSettings.fixedIconSize
         let scale = button.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
-
-        let state = TrinityEmblemState(
-            hasBattery: battery.hasBattery,
-            batteryPercent: battery.percentage,
-            isCharging: battery.isCharging,
-            isPluggedIn: battery.isPluggedIn,
-            isLowPowerMode: battery.isLowPowerMode,
-            showTopPercentage: settings.showTopPercentage,
-            connectionKind: network.kind,
-            wifiStrengthBars: network.wifiStrengthBars,
-            bottomMode: settings.bottomMode,
-            bottomDots: activeDots,
-            bottomProgress: quantizedProgress,
+        let state = TrinityEmblemState.current(
+            battery: battery,
+            network: network,
+            audio: audio,
+            settings: settings,
             isDarkMenuBar: isButtonDarkAppearance(button)
         )
 
