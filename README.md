@@ -7,7 +7,7 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-**TrinityBar** is a lightweight (`~640 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and live `Reduce Transparency` fallbacks).
+**TrinityBar** is a lightweight (`~676 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and live `Reduce Transparency` fallbacks).
 
 <p align="center">
   <img src="assets/dashboard-summary.png" width="382" valign="top" alt="TrinityBar Summary Dashboard" />
@@ -69,7 +69,7 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
 - **macOS 26.0+**
 
 ### Option 1: Download Pre-built Release *(Recommended)*
-1. Download **`TrinityBar-v1.1.2-macos-arm64.zip`** from the [**Latest GitHub Release**](https://github.com/wangzechen/TrinityBar/releases/latest).
+1. Download **`TrinityBar-v1.1.3-macos-arm64.zip`** from the [**Latest GitHub Release**](https://github.com/wangzechen/TrinityBar/releases/latest).
 2. Extract the archive and drag **`TrinityBar.app`** into **`/Applications`**.
 3. Because the binary is ad-hoc signed without a paid Apple Developer ID certificate, clear macOS Gatekeeper's download quarantine flag once before first launch:
    ```zsh
@@ -119,17 +119,20 @@ TrinityBar/
 ├── README.md                                # Product overview, usage & build guide
 ├── ARCHITECTURE.md                          # System design, rendering mechanics & extension guide
 ├── assets/
-│   ├── dashboard-summary.png                # Collapsed summary dashboard screenshot
-│   └── dashboard-settings.png               # Expanded settings drawer screenshot
+│   ├── dashboard-summary.png                # Collapsed summary dashboard screenshot (generated)
+│   └── dashboard-settings.png               # Expanded settings drawer screenshot (generated)
 ├── scripts/
-│   ├── build_app.sh                         # Size-optimized swiftc bundler -> dist/TrinityBar.app (v1.1.2)
-│   └── generate_icon.swift                  # Deterministic 66 KB 1024x1024 AppIcon.icns generator
+│   ├── build_app.sh                         # Size-optimized swiftc bundler -> dist/TrinityBar.app (v1.1.3)
+│   ├── generate_icon.swift                  # Deterministic 66 KB 1024x1024 AppIcon.icns generator
+│   ├── capture_screenshots.sh               # Regenerates assets/ screenshots with privacy-safe demo network data
+│   └── frame_screenshot.swift               # Rounded-card framing for captured screenshots
 └── Sources/TrinityBar/
     ├── TrinityBarApp.swift                  # NSStatusItem split-layer host, icon gestures, Combine sync & lifecycle
     ├── Resources/
     │   └── AppIcon.icns                     # Minimalist 1024x1024 macOS squircle app icon (66 KB)
     ├── Models/
-    │   └── AppSettings.swift                # UserDefaults preferences, PanelRoute & clipboard state
+    │   ├── AppSettings.swift                # UserDefaults preferences, PanelRoute & clipboard state
+    │   └── ScreenshotMode.swift             # TRINITYBAR_SCREENSHOT demo scenes for README screenshots
     ├── Monitors/
     │   ├── BatteryMonitor.swift             # IOPSCopyPowerSourcesInfo + AppleSmartBattery + background AppleSMC
     │   ├── NetworkMonitor.swift             # NWPathMonitor + CoreWLAN + SCDynamicStore + 64-bit sysctl counters

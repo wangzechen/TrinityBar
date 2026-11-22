@@ -36,6 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarGlobalScrollMonitor: Any?
     private var lastRenderedKey: RenderedStatusIconKey?
     private var lastAccessibilityValue: String?
+    private var lastAppearanceName: NSAppearance.Name?
+    /// Screenshot mode only: keeps the wallpaper backdrop window alive for the capture.
+    private var screenshotBackdrop: NSWindow?
     private var lastPlaceholderSize: CGFloat = 0
     private var signalSources: [DispatchSourceSignal] = []
 
@@ -64,9 +67,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.addSubview(colorView)
             self.chromaticImageView = colorView
 
+            // AppKit re-posts `effectiveAppearance` KVO whenever the button's subview images are replaced, even
+            // though the appearance is unchanged. Re-render only on a real appearance change; otherwise every
+            // render would trigger the next one (a 100% CPU main-thread loop).
             appearanceObservation = button.observe(\.effectiveAppearance, options: [.new, .initial]) { [weak self] _, _ in
                 Task { @MainActor [weak self] in
-                    self?.updateStatusIcon(force: true)
+                    guard let self, let name = self.statusItem?.button?.effectiveAppearance.name else { return }
+                    guard name != self.lastAppearanceName else { return }
+                    self.lastAppearanceName = name
+                    self.updateStatusIcon(force: true)
                 }
             }
 
@@ -125,6 +134,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bindStateChanges()
         updateStatusIcon(force: true)
         systemIcons.applyOnLaunchIfNeeded()
+        presentScreenshotSceneIfNeeded()
+    }
+
+    /// `scripts/capture_screenshots.sh` support: opens the requested scene and reports panel geometry.
+    private func presentScreenshotSceneIfNeeded() {
+        guard let scene = ScreenshotMode.scene else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: ScreenshotMode.presentDelay)
+            guard let self, let panel = self.panel, let button = self.statusItem?.button else { return }
+            panel.dismissesOnOutsideClick = false
+            panel.horizontalScreenInset = ScreenshotMode.panelEdgeInset
+            if let screen = button.window?.screen ?? NSScreen.main {
+                let backdrop = ScreenshotMode.makeWallpaperBackdrop(for: screen)
+                backdrop.orderFrontRegardless()
+                self.screenshotBackdrop = backdrop
+            }
+            // The status button may not have a window yet (e.g. ControlCenter is still restarting after the previous
+            // instance restored native icons), in which case `present(below:)` silently no-ops — retry for ~10 s.
+            for _ in 0..<20 where !panel.isVisible {
+                if button.window != nil {
+                    self.togglePanel(button)
+                }
+                if panel.isVisible { break }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            self.settings.summarySettingsExpanded = (scene == .settings)
+            try? await Task.sleep(for: ScreenshotMode.settleDelay)
+            guard panel.isVisible, let buttonFrame = self.statusButtonScreenRect() else { return }
+            ScreenshotMode.writeGeometry(panelFrame: panel.frame, buttonFrame: buttonFrame)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

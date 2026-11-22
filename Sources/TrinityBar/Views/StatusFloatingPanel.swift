@@ -23,6 +23,11 @@ final class StatusFloatingPanel: NSPanel {
     var onScrollDeltaY: ((CGFloat) -> Void)?
     var onEscapePressed: (() -> Bool)?
     var allowsScrollVolume: (() -> Bool)?
+    /// Disabled in screenshot mode so a stray click elsewhere can't close the panel mid-capture.
+    var dismissesOnOutsideClick: Bool = true
+    /// Minimum horizontal gap between the panel and the screen edges (widened in screenshot mode so the
+    /// capture region's side margins never fall off-screen).
+    var horizontalScreenInset: CGFloat = StatusFloatingPanel.screenMargin
 
     private static let permanentHostingCanvasHeight: CGFloat = 1600
     private let rootContainer: NSView
@@ -217,7 +222,11 @@ final class StatusFloatingPanel: NSPanel {
         let maxAvailHeight = max(240, (anchorButtonScreenRect.minY - (screen?.visibleFrame.minY ?? 0)) - Self.menuBarGap - Self.screenMargin - 8)
         let targetHeight = min(maxAvailHeight, max(160, ceil(fitting.height)))
         let panelSize = NSSize(width: targetWidth, height: targetHeight)
-        let targetFrame = Self.computePanelFrame(panelSize: panelSize, anchorScreenRect: anchorButtonScreenRect)
+        let targetFrame = Self.computePanelFrame(
+            panelSize: panelSize,
+            anchorScreenRect: anchorButtonScreenRect,
+            horizontalInset: horizontalScreenInset
+        )
 
         // Keep hosting canvas permanently taller than any route/drawer so NSHostingView never vertically centers on frame 0 before window resize begins
         if hosting.frame.height != Self.permanentHostingCanvasHeight || hosting.frame.origin != .zero {
@@ -265,12 +274,12 @@ final class StatusFloatingPanel: NSPanel {
         dismissPanel()
     }
 
-    private static func computePanelFrame(panelSize: NSSize, anchorScreenRect: NSRect) -> NSRect {
+    private static func computePanelFrame(panelSize: NSSize, anchorScreenRect: NSRect, horizontalInset: CGFloat) -> NSRect {
         let screen = NSScreen.screens.first(where: { $0.frame.intersects(anchorScreenRect) }) ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
 
         var x = anchorScreenRect.midX - panelSize.width / 2.0
-        x = min(max(x, visible.minX + screenMargin), visible.maxX - panelSize.width - screenMargin)
+        x = min(max(x, visible.minX + horizontalInset), visible.maxX - panelSize.width - horizontalInset)
 
         // Screen coordinates always have Y pointing UP: anchorScreenRect.minY is the exact bottom edge of the menu bar button!
         var y = anchorScreenRect.minY - menuBarGap - panelSize.height
@@ -285,7 +294,7 @@ final class StatusFloatingPanel: NSPanel {
         globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             let mouseLoc = NSEvent.mouseLocation
             Task { @MainActor [weak self] in
-                guard let self, self.isVisible else { return }
+                guard let self, self.isVisible, self.dismissesOnOutsideClick else { return }
                 // Let the status bar button handle its own click toggle
                 if self.anchorButtonScreenRect.insetBy(dx: -4, dy: -4).contains(mouseLoc) {
                     return

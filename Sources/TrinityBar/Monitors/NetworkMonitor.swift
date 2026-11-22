@@ -433,7 +433,8 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         }
     }
 
-    private func applyLinkSnapshot(_ snapshot: LinkSnapshot, powerSeq: UInt64) {
+    private func applyLinkSnapshot(_ rawSnapshot: LinkSnapshot, powerSeq: UInt64) {
+        let snapshot = ScreenshotMode.isActive ? Self.sanitizedForScreenshot(rawSnapshot) : rawSnapshot
         if let powerOn = snapshot.wifiPowerOn, pendingWiFiPower == nil, powerSeq == wifiPowerSeq {
             setIfChanged(\.wifiPowerOn, to: powerOn)
         }
@@ -463,6 +464,20 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         if let primaryIface = snapshot.primaryInterfaceName {
             setIfChanged(\.interfaceName, to: primaryIface)
         }
+    }
+
+    /// Replaces identifying network details with neutral demo values for README screenshots.
+    private static func sanitizedForScreenshot(_ snapshot: LinkSnapshot) -> LinkSnapshot {
+        var s = snapshot
+        if s.wireless != nil {
+            s.wireless?.ssid = ScreenshotMode.Demo.ssid
+            s.wireless?.bssid = ScreenshotMode.Demo.bssid
+        }
+        if s.ipv4 != nil { s.ipv4 = ScreenshotMode.Demo.ipv4 }
+        if s.ipv6 != nil { s.ipv6 = ScreenshotMode.Demo.ipv6 }
+        if s.router != nil { s.router = ScreenshotMode.Demo.router }
+        if s.dns != nil { s.dns = ScreenshotMode.Demo.dns }
+        return s
     }
 
     nonisolated private static func readLinkSnapshot(currentKind: ConnectionKind) -> LinkSnapshot {
