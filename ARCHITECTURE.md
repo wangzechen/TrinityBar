@@ -100,7 +100,7 @@ All monitors are `@MainActor ObservableObject` classes designed to keep idle bac
 ### 2.4 Build Pipeline & Bundle Size Optimization (`scripts/`)
 - **`scripts/build_app.sh`** compiles directly via `swiftc -Osize -whole-module-optimization -parse-as-library -strict-concurrency=complete -warnings-as-errors -Xlinker -dead_strip` followed by `strip -x`, producing a **`~565 KB`** arm64 executable without requiring external SwiftPM macro plugin binaries.
   - **Important Constraint**: Do not introduce `@State` (which depends on the `SwiftUIMacros` compiler plugin) inside `View` structs; store transient navigation or disclosure flags as `@Published` properties on `AppSettings`.
-- **`scripts/generate_icon.swift`** renders a crisp `1024x1024` vector squircle icon and writes a single-chunk `ic10` PNG-backed `AppIcon.icns` (**`66 KB`**), keeping the entire packaged `TrinityBar.app` (`v1.1.0`) at **`~640 KB`**.
+- **`scripts/generate_icon.swift`** renders a crisp `1024x1024` vector squircle icon and writes a single-chunk `ic10` PNG-backed `AppIcon.icns` (**`66 KB`**), keeping the entire packaged `TrinityBar.app` (`v1.1.1`) at **`~656 KB`**.
 
 ---
 
@@ -123,7 +123,7 @@ All monitors are `@MainActor ObservableObject` classes designed to keep idle bac
 5. **Dashboard Wiring**:
    - Add a `SummaryModuleHeaderRow` + `<Domain>InfoBarSection` block inside `PopoverDashboardView.summaryContent`.
    - Route `.bluetooth` inside `PopoverDashboardView.body`'s `switch settings.route` (`StatusFloatingPanel` automatically measures and animates to the new route's `fittingSize`).
-6. **Build Script**: Add the new `.swift` file paths to `scripts/build_app.sh`.
+6. **Build Script**: `scripts/build_app.sh` automatically discovers all `Sources/TrinityBar/**/*.swift` files — no manual file list update required.
 
 ### 3.2 Managing Additional Native Control Center Icons
 Append one `ManagedControlCenterItem` entry to `SystemIconsManager.managedItems` in `Sources/TrinityBar/Monitors/SystemIconsManager.swift`:

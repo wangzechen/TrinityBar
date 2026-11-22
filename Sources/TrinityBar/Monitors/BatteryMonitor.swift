@@ -65,6 +65,7 @@ final class BatteryMonitor: ObservableObject {
     nonisolated(unsafe) private var smcTask: Task<Void, Never>?
     nonisolated(unsafe) private var energyAppsTask: Task<Void, Never>?
     private var isPopoverVisible: Bool = false
+    private var smcGeneration: UInt64 = 0
     private var energySampleGeneration: UInt64 = 0
     private var lastAppSampleTime: TimeInterval?
     private var lastAppCounters: [String: RawAppCounter] = [:]
@@ -93,6 +94,7 @@ final class BatteryMonitor: ObservableObject {
         popoverTimer = nil
 
         guard visible else {
+            smcGeneration &+= 1
             energySampleGeneration &+= 1
             smcTask?.cancel()
             smcTask = nil
@@ -108,13 +110,15 @@ final class BatteryMonitor: ObservableObject {
         refresh(includeDetailedSensors: true)
         sampleEnergyApps()
 
-        popoverTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.refresh(includeDetailedSensors: true)
                 self.sampleEnergyApps()
             }
         }
+        timer.tolerance = 0.25
+        popoverTimer = timer
     }
 
     private func setupNotifications() {
@@ -142,21 +146,29 @@ final class BatteryMonitor: ObservableObject {
             }
         }
 
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        let bgTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.refresh()
             }
         }
+        bgTimer.tolerance = 5.0
+        refreshTimer = bgTimer
+    }
+
+    private func setIfChanged<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<BatteryMonitor, T>, to value: T) {
+        if self[keyPath: keyPath] != value {
+            self[keyPath: keyPath] = value
+        }
     }
 
     func refresh(includeDetailedSensors: Bool = false) {
-        isLowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+        setIfChanged(\.isLowPowerMode, to: ProcessInfo.processInfo.isLowPowerModeEnabled)
 
         if let adapter = IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any],
            let rated = adapter[kIOPSPowerAdapterWattsKey as String] as? Int, rated > 0 {
-            adapterRatedWatts = rated
+            setIfChanged(\.adapterRatedWatts, to: rated)
         } else {
-            adapterRatedWatts = nil
+            setIfChanged(\.adapterRatedWatts, to: nil)
         }
 
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
@@ -164,47 +176,50 @@ final class BatteryMonitor: ObservableObject {
               let first = list.first,
               let desc = IOPSGetPowerSourceDescription(snapshot, first)?.takeUnretainedValue() as? [String: Any]
         else {
-            hasBattery = false
-            percentage = 100
-            isCharging = false
-            isPluggedIn = true
-            timeRemainingMinutes = nil
-            wattage = nil
-            healthPercent = nil
-            cycleCount = nil
-            temperatureCelsius = nil
-            voltageVolts = nil
-            amperageMA = nil
-            designCapacityMAh = nil
-            maxCapacityMAh = nil
+            setIfChanged(\.hasBattery, to: false)
+            setIfChanged(\.percentage, to: 100)
+            setIfChanged(\.isCharging, to: false)
+            setIfChanged(\.isPluggedIn, to: true)
+            setIfChanged(\.timeRemainingMinutes, to: nil)
+            setIfChanged(\.wattage, to: nil)
+            setIfChanged(\.healthPercent, to: nil)
+            setIfChanged(\.cycleCount, to: nil)
+            setIfChanged(\.temperatureCelsius, to: nil)
+            setIfChanged(\.voltageVolts, to: nil)
+            setIfChanged(\.amperageMA, to: nil)
+            setIfChanged(\.designCapacityMAh, to: nil)
+            setIfChanged(\.maxCapacityMAh, to: nil)
             if includeDetailedSensors || popoverTimer != nil {
                 readSMCSensors()
             }
             return
         }
 
-        hasBattery = true
+        setIfChanged(\.hasBattery, to: true)
         let current = desc[kIOPSCurrentCapacityKey as String] as? Int ?? 100
         let maxCap = max(1, desc[kIOPSMaxCapacityKey as String] as? Int ?? 100)
-        percentage = min(100, max(0, Int(round(Double(current) / Double(maxCap) * 100.0))))
+        setIfChanged(\.percentage, to: min(100, max(0, Int(round(Double(current) / Double(maxCap) * 100.0)))))
 
         let powerState = desc[kIOPSPowerSourceStateKey as String] as? String
-        isPluggedIn = (powerState == kIOPSACPowerValue as String)
-        isCharging = (desc[kIOPSIsChargingKey as String] as? Bool) ?? false
+        setIfChanged(\.isPluggedIn, to: powerState == kIOPSACPowerValue as String)
+        let charging = (desc[kIOPSIsChargingKey as String] as? Bool) ?? false
+        setIfChanged(\.isCharging, to: charging)
 
-        if isCharging {
+        let nextMinutes: Int?
+        if charging {
             if let ttf = desc[kIOPSTimeToFullChargeKey as String] as? Int, ttf > 0, ttf < 6000 {
-                timeRemainingMinutes = ttf
+                nextMinutes = ttf
             } else {
-                timeRemainingMinutes = nil
+                nextMinutes = nil
             }
         } else {
             if let tte = desc[kIOPSTimeToEmptyKey as String] as? Int, tte > 0, tte < 6000 {
-                timeRemainingMinutes = tte
+                nextMinutes = tte
             } else {
-                timeRemainingMinutes = nil
+                nextMinutes = nil
             }
         }
+        setIfChanged(\.timeRemainingMinutes, to: nextMinutes)
 
         readSmartBatteryRegistry()
         if includeDetailedSensors || popoverTimer != nil {
@@ -225,49 +240,45 @@ final class BatteryMonitor: ObservableObject {
         else { return }
 
         if let cycles = props["CycleCount"] as? Int, cycles >= 0 {
-            cycleCount = cycles
+            setIfChanged(\.cycleCount, to: cycles)
         }
 
         let rawMax = (props["AppleRawMaxCapacity"] as? Int) ?? (props["NominalChargeCapacity"] as? Int)
         let design = props["DesignCapacity"] as? Int
-        if let rawMax, rawMax > 200 { maxCapacityMAh = rawMax }
-        if let design, design > 200 { designCapacityMAh = design }
+        if let rawMax, rawMax > 200 { setIfChanged(\.maxCapacityMAh, to: rawMax) }
+        if let design, design > 200 { setIfChanged(\.designCapacityMAh, to: design) }
 
         if let directHealth = props["MaximumCapacityPercent"] as? Int, (10...110).contains(directHealth) {
-            healthPercent = min(100, directHealth)
+            setIfChanged(\.healthPercent, to: min(100, directHealth))
         } else if let rawMax, let design, rawMax > 200, design > 200 {
             let pct = Int(round(Double(rawMax) / Double(design) * 100.0))
             if (10...110).contains(pct) {
-                healthPercent = min(100, pct)
+                setIfChanged(\.healthPercent, to: min(100, pct))
             }
         }
 
         if let pf = props["PermanentFailureStatus"] as? Int, pf != 0 {
-            conditionText = "Service Recommended"
+            setIfChanged(\.conditionText, to: "Service Recommended")
         } else {
-            conditionText = "Normal"
+            setIfChanged(\.conditionText, to: "Normal")
         }
 
-        // Temperature in AppleSmartBattery is reported in centi-Kelvin or centi-Celsius depending on platform:
-        // On Apple Silicon macOS, "Temperature" is typically deci-Kelvin (e.g. 3045 -> 304.5K -> 31.35°C) or centi-Celsius (~3120 -> 31.2°C).
+        // Temperature in AppleSmartBattery is reported in centi-Celsius (~3120 -> 31.2°C) or deci-Kelvin (~3045 -> 31.35°C).
         if let rawTemp = props["Temperature"] as? Int, rawTemp > 0 {
             let cFromDeciKelvin = Double(rawTemp) / 10.0 - 273.15
             let cFromCentiCelsius = Double(rawTemp) / 100.0
             if (5.0...85.0).contains(cFromCentiCelsius) {
-                temperatureCelsius = cFromCentiCelsius
+                setIfChanged(\.temperatureCelsius, to: cFromCentiCelsius)
             } else if (5.0...85.0).contains(cFromDeciKelvin) {
-                temperatureCelsius = cFromDeciKelvin
+                setIfChanged(\.temperatureCelsius, to: cFromDeciKelvin)
             }
         }
 
         if let mv = props["Voltage"] as? Int, mv > 1_000 {
-            voltageVolts = Double(mv) / 1000.0
-            if let rawAmp = props["InstantAmperage"] as? Int {
-                let signedAmp = Int(Int64(bitPattern: UInt64(bitPattern: Int64(rawAmp))))
-                if abs(signedAmp) < 30_000 {
-                    amperageMA = signedAmp
-                    wattage = (Double(mv) * Double(signedAmp)) / 1_000_000.0
-                }
+            setIfChanged(\.voltageVolts, to: Double(mv) / 1000.0)
+            if let rawAmp = props["InstantAmperage"] as? Int, abs(rawAmp) < 30_000 {
+                setIfChanged(\.amperageMA, to: rawAmp)
+                setIfChanged(\.wattage, to: (Double(mv) * Double(rawAmp)) / 1_000_000.0)
             }
         }
     }
@@ -276,32 +287,36 @@ final class BatteryMonitor: ObservableObject {
 
     private func readSMCSensors() {
         smcTask?.cancel()
+        smcGeneration &+= 1
+        let generation = smcGeneration
         let pluggedIn = isPluggedIn
         smcTask = Task { @MainActor [weak self] in
             let snapshot = await Task.detached(priority: .utility) {
                 Self.readSMCSensorsSnapshot(isPluggedIn: pluggedIn)
             }.value
-            guard !Task.isCancelled, let self, let snapshot else { return }
-            self.applySMCSnapshot(snapshot)
+            guard let self, self.smcGeneration == generation else { return }
             self.smcTask = nil
+            guard !Task.isCancelled, let snapshot else { return }
+            self.applySMCSnapshot(snapshot)
         }
     }
 
     private func applySMCSnapshot(_ snapshot: SMCSensorSnapshot) {
-        if let pstr = snapshot.systemLoadWatts {
+        if let pstr = snapshot.systemLoadWatts, systemLoadWatts != pstr {
             systemLoadWatts = pstr
         }
-        adapterInputWatts = isPluggedIn ? snapshot.adapterInputWatts : nil
-        displayWatts = snapshot.displayWatts
-        usbOutputWatts = snapshot.usbOutputWatts
+        let nextAdapter = isPluggedIn ? snapshot.adapterInputWatts : nil
+        if adapterInputWatts != nextAdapter { adapterInputWatts = nextAdapter }
+        if displayWatts != snapshot.displayWatts { displayWatts = snapshot.displayWatts }
+        if usbOutputWatts != snapshot.usbOutputWatts { usbOutputWatts = snapshot.usbOutputWatts }
 
         if hasBattery,
            let bv = snapshot.batteryVoltageVolts,
            let ba = snapshot.batteryAmperageMA,
            let w = snapshot.batteryWattage {
-            voltageVolts = bv
-            amperageMA = ba
-            wattage = w
+            if voltageVolts != bv { voltageVolts = bv }
+            if amperageMA != ba { amperageMA = ba }
+            if wattage != w { wattage = w }
         }
     }
 
@@ -389,43 +404,48 @@ final class BatteryMonitor: ObservableObject {
         UInt32(b[off]) | (UInt32(b[off + 1]) << 8) | (UInt32(b[off + 2]) << 16) | (UInt32(b[off + 3]) << 24)
     }
 
-    nonisolated private static func readSMCScalar(key: UInt32, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
+    nonisolated private static func readSMCRaw(
+        key: UInt32,
+        exchange: ([UInt8]) -> [UInt8]?
+    ) -> (type: UInt32, size: UInt32, resp: [UInt8])? {
         var req = [UInt8](repeating: 0, count: 80)
         for i in 0..<4 { req[i] = UInt8(truncatingIfNeeded: key >> (i * 8)) }
         req[42] = 9 // read key info
         guard let info = exchange(req), info[40] == 0 else { return nil }
         let size = leUInt32(info, 28)
         let type = leUInt32(info, 32)
-        switch (type, size) {
-        case (0x666c7420, 4), (0x66706532, 2), (0x73703738, 2): break
-        default: return nil
-        }
         req.replaceSubrange(28..<32, with: info[28..<32])
         req[42] = 5 // read bytes
         guard let resp = exchange(req), resp[40] == 0 else { return nil }
+        return (type, size, resp)
+    }
+
+    nonisolated private static func readSMCScalar(key: UInt32, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
+        guard let raw = readSMCRaw(key: key, exchange: exchange) else { return nil }
         let val: Double
-        if type == 0x666c7420 {
-            val = Double(Float(bitPattern: leUInt32(resp, 48)))
-        } else {
-            let raw = (UInt16(resp[48]) << 8) | UInt16(resp[49])
-            val = (type == 0x66706532) ? Double(raw) / 4.0 : Double(Int16(bitPattern: raw)) / 256.0
+        switch (raw.type, raw.size) {
+        case (0x666c7420, 4):
+            val = Double(Float(bitPattern: leUInt32(raw.resp, 48)))
+        case (0x66706532, 2):
+            let bits = (UInt16(raw.resp[48]) << 8) | UInt16(raw.resp[49])
+            val = Double(bits) / 4.0
+        case (0x73703738, 2):
+            let bits = (UInt16(raw.resp[48]) << 8) | UInt16(raw.resp[49])
+            val = Double(Int16(bitPattern: bits)) / 256.0
+        default:
+            return nil
         }
         return val.isFinite ? val : nil
     }
 
     nonisolated private static func readSMCIntegerSensor(key: UInt32, signed: Bool, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
-        var req = [UInt8](repeating: 0, count: 80)
-        for i in 0..<4 { req[i] = UInt8(truncatingIfNeeded: key >> (i * 8)) }
-        req[42] = 9
-        guard let info = exchange(req), info[40] == 0 else { return nil }
-        let size = leUInt32(info, 28)
-        let type = leUInt32(info, 32)
-        guard size == 2, (type == 0x73693136 || type == 0x75693136) else { return nil }
-        req.replaceSubrange(28..<32, with: info[28..<32])
-        req[42] = 5
-        guard let resp = exchange(req), resp[40] == 0 else { return nil }
-        let raw = UInt16(resp[48]) | (UInt16(resp[49]) << 8)
-        let val = (signed ? Double(Int16(bitPattern: raw)) : Double(raw)) / 1000.0
+        guard let raw = readSMCRaw(key: key, exchange: exchange),
+              raw.size == 2,
+              (raw.type == 0x73693136 || raw.type == 0x75693136) else {
+            return nil
+        }
+        let bits = UInt16(raw.resp[48]) | (UInt16(raw.resp[49]) << 8)
+        let val = (signed ? Double(Int16(bitPattern: bits)) : Double(bits)) / 1000.0
         return val.isFinite ? val : nil
     }
 
@@ -507,8 +527,13 @@ final class BatteryMonitor: ObservableObject {
                     }
                 }
                 items.sort { $0.score > $1.score }
-                self.highEnergyApps = Array(items.prefix(5))
-                self.isSamplingEnergyApps = false
+                let topItems = Array(items.prefix(5))
+                if self.highEnergyApps != topItems {
+                    self.highEnergyApps = topItems
+                }
+                if self.isSamplingEnergyApps {
+                    self.isSamplingEnergyApps = false
+                }
             }
 
             self.lastAppCounters = currentCounters

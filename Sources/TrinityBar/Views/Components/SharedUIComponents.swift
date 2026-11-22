@@ -1,6 +1,20 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Glass Card Surface Helper
+
+extension View {
+    /// Applies TrinityBar's rounded Liquid Glass card fill + hairline stroke border.
+    func glassCardSurface(fill: Color, stroke: Color, cornerRadius: CGFloat = 10) -> some View {
+        self
+            .background(fill, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(stroke, lineWidth: 1)
+            }
+    }
+}
+
 // MARK: - Summary Liquid Glass Metric Card
 
 /// Reusable rounded-10 Liquid Glass metric sub-card (`height: 40pt`) used across Power, Network, and Sound modules.
@@ -40,11 +54,7 @@ struct SummaryGlassMetricCard: View {
         .frame(maxWidth: .infinity)
         .frame(height: 40)
         .padding(.horizontal, 5)
-        .background(fill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(stroke, lineWidth: 1)
-        }
+        .glassCardSurface(fill: fill, stroke: stroke)
     }
 }
 

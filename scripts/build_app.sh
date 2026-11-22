@@ -4,39 +4,32 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-VERSION="1.1.0"
-BUILD_NUMBER="2"
+VERSION="1.1.1"
+BUILD_NUMBER="3"
 DIST_DIR="$PROJECT_DIR/dist"
 APP_DIR="$DIST_DIR/TrinityBar.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
+rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+SWIFT_FILES=(Sources/TrinityBar/**/*.swift(N))
 
-echo "Compiling TrinityBar (arm64 release, macOS 26+ Liquid Glass target)..."
+if (( ${#SWIFT_FILES[@]} == 0 )); then
+    echo "Error: No Swift source files found under Sources/TrinityBar" >&2
+    exit 1
+fi
+
+echo "Compiling TrinityBar v$VERSION (${#SWIFT_FILES[@]} files, arm64 release, macOS 26+ Liquid Glass target)..."
 swiftc -Osize -whole-module-optimization -parse-as-library \
     -strict-concurrency=complete -warnings-as-errors \
     -Xlinker -dead_strip \
     -target arm64-apple-macosx26.0 \
     -sdk "$SDK_PATH" \
-    Sources/TrinityBar/Models/AppSettings.swift \
-    Sources/TrinityBar/Monitors/BatteryMonitor.swift \
-    Sources/TrinityBar/Monitors/NetworkMonitor.swift \
-    Sources/TrinityBar/Monitors/AudioVolumeMonitor.swift \
-    Sources/TrinityBar/Monitors/CaffeinateManager.swift \
-    Sources/TrinityBar/Monitors/SystemIconsManager.swift \
-    Sources/TrinityBar/Views/TrinityEmblemView.swift \
-    Sources/TrinityBar/Views/StatusFloatingPanel.swift \
-    Sources/TrinityBar/Views/Components/SharedUIComponents.swift \
-    Sources/TrinityBar/Views/Components/SummaryMetricSections.swift \
-    Sources/TrinityBar/Views/Pages/BatteryDetailsPageView.swift \
-    Sources/TrinityBar/Views/Pages/NetworkDetailsPageView.swift \
-    Sources/TrinityBar/Views/Pages/SoundDetailsPageView.swift \
-    Sources/TrinityBar/Views/PopoverDashboardView.swift \
-    Sources/TrinityBar/TrinityBarApp.swift \
+    "${SWIFT_FILES[@]}" \
     -framework AppKit \
     -framework SwiftUI \
     -framework QuartzCore \
@@ -87,12 +80,24 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
     <string>$VERSION</string>
     <key>CFBundleVersion</key>
     <string>$BUILD_NUMBER</string>
+    <key>CFBundleGetInfoString</key>
+    <string>TrinityBar $VERSION, Copyright © 2026 Zechen Wang.</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Zechen Wang. MIT License.</string>
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
     <key>NSLocationUsageDescription</key>
     <string>TrinityBar uses Location Services only so macOS allows reading your Wi-Fi network name (SSID) and nearby Wi-Fi list.</string>
     <key>NSLocationWhenInUseUsageDescription</key>
@@ -102,15 +107,18 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
 EOF
 
 touch "$APP_DIR"
-codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1 || true
+plutil -lint "$CONTENTS_DIR/Info.plist" >/dev/null
+codesign --force --deep --sign - "$APP_DIR" >/dev/null 2>&1
+codesign --verify --deep --strict "$APP_DIR"
 
-echo "Packaged successfully at: $APP_DIR"
+echo "Packaged successfully at: $APP_DIR (v$VERSION, build $BUILD_NUMBER)"
 
 if [[ "${1:-}" == "--release" ]]; then
     ARCHIVE_NAME="TrinityBar-v${VERSION}-macos-arm64.zip"
     ARCHIVE_PATH="$DIST_DIR/$ARCHIVE_NAME"
-    rm -f "$ARCHIVE_PATH" "$ARCHIVE_PATH.sha256"
+    rm -f "$DIST_DIR"/TrinityBar-v*-macos-arm64.zip "$DIST_DIR"/TrinityBar-v*-macos-arm64.zip.sha256
     ditto -c -k --keepParent "$APP_DIR" "$ARCHIVE_PATH"
     (cd "$DIST_DIR" && shasum -a 256 "$ARCHIVE_NAME" > "${ARCHIVE_NAME}.sha256")
+    (cd "$DIST_DIR" && shasum -a 256 -c "${ARCHIVE_NAME}.sha256" >/dev/null)
     echo "Release archive created at: $ARCHIVE_PATH"
 fi

@@ -99,14 +99,31 @@ final class CaffeinateManager: ObservableObject {
 
         let target = Date().addingTimeInterval(TimeInterval(duration.rawValue))
         expiresAt = target
-        updateCountdownDisplay(remaining: target.timeIntervalSinceNow)
+        let remaining = target.timeIntervalSinceNow
+        updateCountdownDisplay(remaining: remaining)
+        scheduleNextTick(remaining: remaining)
+    }
 
-        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+    private func scheduleNextTick(remaining: TimeInterval) {
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        guard isKeepingAwake, remaining > 0 else { return }
+
+        let interval: TimeInterval
+        if remaining <= 60.0 {
+            interval = min(1.0, remaining)
+        } else {
+            let mod = remaining.truncatingRemainder(dividingBy: 60.0)
+            let toBoundary = mod > 0.25 ? mod : 60.0
+            interval = max(1.0, min(toBoundary, remaining - 59.5))
+        }
+
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.handleCountdownTick()
             }
         }
-        timer.tolerance = 0.2
+        timer.tolerance = remaining <= 60.0 ? 0.15 : min(1.0, interval * 0.1)
         RunLoop.main.add(timer, forMode: .common)
         countdownTimer = timer
     }
@@ -131,6 +148,7 @@ final class CaffeinateManager: ObservableObject {
             return
         }
         updateCountdownDisplay(remaining: remaining)
+        scheduleNextTick(remaining: remaining)
     }
 
     private func updateCountdownDisplay(remaining: TimeInterval) {

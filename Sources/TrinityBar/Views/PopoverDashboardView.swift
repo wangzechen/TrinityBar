@@ -279,37 +279,19 @@ struct PopoverDashboardView: View {
                 .frame(width: 164)
             }
 
-            HStack {
-                Text("Top % Number")
-                    .font(.system(size: 11.5))
-                Spacer()
-                Toggle("", isOn: $settings.showTopPercentage)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-            }
+            settingsToggleRow("Top % Number", isOn: $settings.showTopPercentage)
 
-            HStack {
-                Text("Icon Volume Control")
-                    .font(.system(size: 11.5))
-                Spacer()
-                Toggle("", isOn: $settings.iconVolumeControl)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .help("Scroll on the menu bar icon to adjust volume, and ⌥-Click to mute")
-            }
+            settingsToggleRow(
+                "Icon Volume Control",
+                isOn: $settings.iconVolumeControl,
+                help: "Scroll on the menu bar icon to adjust volume, and ⌥-Click to mute"
+            )
 
-            HStack {
-                Text("Hide Native Icons")
-                    .font(.system(size: 11.5))
-                Spacer()
-                Toggle("", isOn: $systemIcons.autoHideEnabled)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .help("Hide native macOS Wi-Fi, Battery, and Volume icons while TrinityBar is running")
-            }
+            settingsToggleRow(
+                "Hide Native Icons",
+                isOn: $systemIcons.autoHideEnabled,
+                help: "Hide native macOS Wi-Fi, Battery, and Volume icons while TrinityBar is running"
+            )
 
             HStack(spacing: 6) {
                 Text("Launch at Login")
@@ -384,6 +366,7 @@ struct PopoverDashboardView: View {
                                 )
                         }
                         .buttonStyle(.plain)
+                        .help(duration == .indefinite ? "Keep awake indefinitely" : "Keep awake for \(duration.shortLabel)")
                     }
                 }
             }
@@ -403,13 +386,22 @@ struct PopoverDashboardView: View {
             }
         }
         .padding(10)
-        .background(
-            Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.05),
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .glassCardSurface(
+            fill: Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.05),
+            stroke: Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.10)
         )
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.10), lineWidth: 1)
+    }
+
+    private func settingsToggleRow(_ title: String, isOn: Binding<Bool>, help: String? = nil) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 11.5))
+            Spacer()
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+                .help(help ?? "")
         }
     }
 

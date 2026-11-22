@@ -48,18 +48,21 @@ final class AppSettings: ObservableObject {
 
     @Published var bottomMode: BottomIndicatorMode {
         didSet {
+            guard bottomMode != oldValue else { return }
             UserDefaults.standard.set(bottomMode.rawValue, forKey: Keys.bottomMode)
         }
     }
 
     @Published var showTopPercentage: Bool {
         didSet {
+            guard showTopPercentage != oldValue else { return }
             UserDefaults.standard.set(showTopPercentage, forKey: Keys.showTopPercentage)
         }
     }
 
     @Published var iconVolumeControl: Bool {
         didSet {
+            guard iconVolumeControl != oldValue else { return }
             UserDefaults.standard.set(iconVolumeControl, forKey: Keys.iconVolumeControl)
         }
     }
@@ -76,7 +79,11 @@ final class AppSettings: ObservableObject {
     @Published var soundDetailsExpanded: Bool = false
     @Published private(set) var copiedRowKey: String?
 
-    private var copyResetTask: Task<Void, Never>?
+    nonisolated(unsafe) private var copyResetTask: Task<Void, Never>?
+
+    deinit {
+        copyResetTask?.cancel()
+    }
 
     init() {
         let defaults = UserDefaults.standard
@@ -101,8 +108,10 @@ final class AppSettings: ObservableObject {
     /// Reads current Login Item registration state from macOS `SMAppService.mainApp`.
     func refreshLaunchAtLoginStatus() {
         let status = SMAppService.mainApp.status
-        launchAtLogin = (status == .enabled || status == .requiresApproval)
-        launchAtLoginRequiresApproval = (status == .requiresApproval)
+        let nextEnabled = (status == .enabled || status == .requiresApproval)
+        let nextApproval = (status == .requiresApproval)
+        if launchAtLogin != nextEnabled { launchAtLogin = nextEnabled }
+        if launchAtLoginRequiresApproval != nextApproval { launchAtLoginRequiresApproval = nextApproval }
     }
 
     /// Registers or unregisters `TrinityBar.app` as a macOS Login Item.

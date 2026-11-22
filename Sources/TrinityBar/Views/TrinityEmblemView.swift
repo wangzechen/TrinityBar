@@ -61,6 +61,20 @@ enum TrinityStatusIconRenderer {
         case chromaticOnly
     }
 
+    // Cached immutable CoreGraphics / typography resources to avoid per-render allocations
+    private static let deviceRGB = CGColorSpaceCreateDeviceRGB()
+    private static let plugSymbolName: String =
+        NSImage(systemSymbolName: "powerplug.portrait.fill", accessibilityDescription: nil) != nil
+        ? "powerplug.portrait.fill"
+        : "powerplug.fill"
+    private static let twoDigitFont: NSFont = makeRoundedBoldFont(size: 30.0)
+    private static let threeDigitFont: NSFont = makeRoundedBoldFont(size: 27.5)
+
+    private static func makeRoundedBoldFont(size: CGFloat) -> NSFont {
+        let base = NSFont.systemFont(ofSize: size, weight: .bold)
+        return base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: size) } ?? base
+    }
+
     // Symmetric 100x100 polar geometry (top-down Y: 0° = right, 90° = bottom, 180° = left, 270° = top)
     private static let gridSize: CGFloat = 100.0
     private static let ringCenter = CGPoint(x: 50.0, y: 51.5)
@@ -196,7 +210,7 @@ enum TrinityStatusIconRenderer {
                   height: pixelDim,
                   bitsPerComponent: 8,
                   bytesPerRow: pixelDim * 4,
-                  space: CGColorSpaceCreateDeviceRGB(),
+                  space: deviceRGB,
                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
               )
         else {
@@ -236,7 +250,7 @@ enum TrinityStatusIconRenderer {
                   height: finalDim,
                   bitsPerComponent: 8,
                   bytesPerRow: finalDim * 4,
-                  space: CGColorSpaceCreateDeviceRGB(),
+                  space: deviceRGB,
                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
               )
         else {
@@ -318,11 +332,8 @@ enum TrinityStatusIconRenderer {
                     in: ctx
                 )
             } else if !state.hasBattery || state.isPluggedIn {
-                let plugName = NSImage(systemSymbolName: "powerplug.portrait.fill", accessibilityDescription: nil) != nil
-                    ? "powerplug.portrait.fill"
-                    : "powerplug.fill"
                 drawSymbol(
-                    name: plugName,
+                    name: plugSymbolName,
                     variableValue: 1.0,
                     pointSize: 20.5,
                     weight: .semibold,
@@ -539,14 +550,10 @@ enum TrinityStatusIconRenderer {
         center: CGPoint,
         in ctx: CGContext
     ) {
-        let fontSize: CGFloat = text.count >= 3 ? 27.5 : 30.0
-        let baseFont = NSFont.systemFont(ofSize: fontSize, weight: .bold)
-        let font = baseFont.fontDescriptor.withDesign(.rounded)
-            .flatMap { NSFont(descriptor: $0, size: fontSize) } ?? baseFont
-
+        let font = text.count >= 3 ? threeDigitFont : twoDigitFont
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .kern: -fontSize * 0.04,
+            .kern: -font.pointSize * 0.04,
             .foregroundColor: NSColor(cgColor: color) ?? .white
         ]
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))

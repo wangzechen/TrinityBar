@@ -79,7 +79,7 @@ final class SystemIconsManager: ObservableObject {
     }
 
     func applyOnLaunchIfNeeded() {
-        if autoHideEnabled || !includesVolumeInEmblem {
+        if autoHideEnabled {
             applyCurrentPolicy()
         } else if isCurrentlyHiddenByApp {
             restoreSystemIcons()
@@ -95,49 +95,62 @@ final class SystemIconsManager: ObservableObject {
     func applyCurrentPolicy() {
         let ud = UserDefaults.standard
 
-        // If Hide Native Icons is OFF and Volume is shown in the emblem, restore everything to user's snapshot.
-        if !autoHideEnabled && includesVolumeInEmblem {
-            restoreSystemIcons()
+        if !autoHideEnabled {
+            if isCurrentlyHiddenByApp {
+                restoreSystemIcons()
+            }
+            // When Hide Native Icons is OFF, only surface native Sound if Volume Bar is None
+            // without touching or snapshotting Wi-Fi / Battery.
+            if !includesVolumeInEmblem,
+               let soundItem = Self.managedItems.first(where: { $0.moduleKey == "Sound" }),
+               applyDefaultVisible(soundItem) {
+                syncPreferences()
+                restartControlCenter()
+            }
             return
         }
 
         captureSnapshotsIfNeeded()
 
+        var changed = false
         for item in Self.managedItems {
             if item.moduleKey == "Sound" && !includesVolumeInEmblem {
                 // Volume Bar == None -> explicitly show native Sound icon in the macOS status bar.
-                applyDefaultVisible(item)
-            } else if autoHideEnabled {
-                applyHidden(item)
+                if applyDefaultVisible(item) { changed = true }
             } else {
-                restoreItemOrDefault(item)
+                if applyHidden(item) { changed = true }
             }
         }
 
-        syncPreferences()
         isCurrentlyHiddenByApp = true
         ud.set(true, forKey: Keys.isCurrentlyHidden)
-        restartControlCenter()
+        if changed {
+            syncPreferences()
+            restartControlCenter()
+        }
     }
 
     func restoreSystemIcons() {
         let ud = UserDefaults.standard
+        var changed = false
 
         if ud.bool(forKey: Keys.hasSnapshot) {
             for item in Self.managedItems {
-                restoreItemOrDefault(item)
+                if restoreItemOrDefault(item) { changed = true }
             }
         } else {
             for item in Self.managedItems {
-                applyDefaultVisible(item)
+                if applyDefaultVisible(item) { changed = true }
             }
         }
 
-        syncPreferences()
         isCurrentlyHiddenByApp = false
         ud.set(false, forKey: Keys.isCurrentlyHidden)
         ud.synchronize()
-        restartControlCenter()
+        if changed {
+            syncPreferences()
+            restartControlCenter()
+        }
     }
 
     // MARK: - Snapshot & CFPreferences Helpers
@@ -163,33 +176,40 @@ final class SystemIconsManager: ObservableObject {
         saveAnyHostSnapshot(key: item.statusItemVisibleCCKey, existsKey: item.visCCExistsKey, valKey: item.visCCValKey)
     }
 
-    private func restoreItemOrDefault(_ item: ManagedControlCenterItem) {
+    @discardableResult
+    private func restoreItemOrDefault(_ item: ManagedControlCenterItem) -> Bool {
         let ud = UserDefaults.standard
         if item.moduleKey == "Sound" && !ud.bool(forKey: Keys.hasSoundSnapshot) {
-            applyDefaultVisible(item)
+            return applyDefaultVisible(item)
         } else if ud.bool(forKey: Keys.hasSnapshot) {
-            restoreItemSnapshot(item)
+            return restoreItemSnapshot(item)
         } else {
-            applyDefaultVisible(item)
+            return applyDefaultVisible(item)
         }
     }
 
-    private func restoreItemSnapshot(_ item: ManagedControlCenterItem) {
-        restoreByHostInt(key: item.moduleKey, existsKey: item.hostExistsKey, valKey: item.hostValKey)
-        restoreAnyHostBool(key: item.statusItemVisibleKey, existsKey: item.visExistsKey, valKey: item.visValKey)
-        restoreAnyHostBool(key: item.statusItemVisibleCCKey, existsKey: item.visCCExistsKey, valKey: item.visCCValKey)
+    @discardableResult
+    private func restoreItemSnapshot(_ item: ManagedControlCenterItem) -> Bool {
+        let a = restoreByHostInt(key: item.moduleKey, existsKey: item.hostExistsKey, valKey: item.hostValKey)
+        let b = restoreAnyHostBool(key: item.statusItemVisibleKey, existsKey: item.visExistsKey, valKey: item.visValKey)
+        let c = restoreAnyHostBool(key: item.statusItemVisibleCCKey, existsKey: item.visCCExistsKey, valKey: item.visCCValKey)
+        return a || b || c
     }
 
-    private func applyHidden(_ item: ManagedControlCenterItem) {
-        setByHostInt(key: item.moduleKey, value: item.hiddenHostCode)
-        setAnyHostBool(key: item.statusItemVisibleKey, value: false)
-        setAnyHostBool(key: item.statusItemVisibleCCKey, value: false)
+    @discardableResult
+    private func applyHidden(_ item: ManagedControlCenterItem) -> Bool {
+        let a = setByHostInt(key: item.moduleKey, value: item.hiddenHostCode)
+        let b = setAnyHostBool(key: item.statusItemVisibleKey, value: false)
+        let c = setAnyHostBool(key: item.statusItemVisibleCCKey, value: false)
+        return a || b || c
     }
 
-    private func applyDefaultVisible(_ item: ManagedControlCenterItem) {
-        setByHostInt(key: item.moduleKey, value: item.visibleHostCode)
-        setAnyHostBool(key: item.statusItemVisibleKey, value: true)
-        setAnyHostBool(key: item.statusItemVisibleCCKey, value: true)
+    @discardableResult
+    private func applyDefaultVisible(_ item: ManagedControlCenterItem) -> Bool {
+        let a = setByHostInt(key: item.moduleKey, value: item.visibleHostCode)
+        let b = setAnyHostBool(key: item.statusItemVisibleKey, value: true)
+        let c = setAnyHostBool(key: item.statusItemVisibleCCKey, value: true)
+        return a || b || c
     }
 
     private func saveByHostSnapshot(key: String, existsKey: String, valKey: String) {
@@ -214,31 +234,41 @@ final class SystemIconsManager: ObservableObject {
         }
     }
 
-    private func setByHostInt(key: String, value: Int?) {
+    @discardableResult
+    private func setByHostInt(key: String, value: Int?) -> Bool {
+        let current = (CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? NSNumber)?.intValue
+        guard current != value else { return false }
         let cfVal: CFPropertyList? = value.map { NSNumber(value: $0) }
         CFPreferencesSetValue(key as CFString, cfVal, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        return true
     }
 
-    private func setAnyHostBool(key: String, value: Bool?) {
+    @discardableResult
+    private func setAnyHostBool(key: String, value: Bool?) -> Bool {
+        let current = (CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? NSNumber)?.boolValue
+        guard current != value else { return false }
         let cfVal: CFPropertyList? = value.map { $0 ? kCFBooleanTrue : kCFBooleanFalse }
         CFPreferencesSetValue(key as CFString, cfVal, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        return true
     }
 
-    private func restoreByHostInt(key: String, existsKey: String, valKey: String) {
+    @discardableResult
+    private func restoreByHostInt(key: String, existsKey: String, valKey: String) -> Bool {
         let ud = UserDefaults.standard
         if ud.bool(forKey: existsKey) {
-            setByHostInt(key: key, value: ud.integer(forKey: valKey))
+            return setByHostInt(key: key, value: ud.integer(forKey: valKey))
         } else {
-            setByHostInt(key: key, value: nil)
+            return setByHostInt(key: key, value: nil)
         }
     }
 
-    private func restoreAnyHostBool(key: String, existsKey: String, valKey: String) {
+    @discardableResult
+    private func restoreAnyHostBool(key: String, existsKey: String, valKey: String) -> Bool {
         let ud = UserDefaults.standard
         if ud.bool(forKey: existsKey) {
-            setAnyHostBool(key: key, value: ud.bool(forKey: valKey))
+            return setAnyHostBool(key: key, value: ud.bool(forKey: valKey))
         } else {
-            setAnyHostBool(key: key, value: nil)
+            return setAnyHostBool(key: key, value: nil)
         }
     }
 

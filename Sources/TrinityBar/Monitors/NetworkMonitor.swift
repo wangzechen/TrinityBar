@@ -79,6 +79,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
     private let locationManager = CLLocationManager()
     nonisolated(unsafe) private var liveSamplerTimer: Timer?
     nonisolated(unsafe) private var signalRefreshTimer: Timer?
+    nonisolated(unsafe) private var activePingConnection: NWConnection?
     /// Accessed exclusively on `wlanWorkerQueue`.
     nonisolated(unsafe) private var scannedCWNets: [String: CWNetwork] = [:]
     private var prevBytes: (rx: UInt64, tx: UInt64, time: TimeInterval)?
@@ -90,16 +91,20 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         startPathMonitor()
         refreshStaticTelemetry()
 
-        signalRefreshTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: true) { [weak self] _ in
+        let bgTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.refreshWifiAndIP()
             }
         }
+        bgTimer.tolerance = 2.0
+        signalRefreshTimer = bgTimer
     }
 
     deinit {
         liveSamplerTimer?.invalidate()
         signalRefreshTimer?.invalidate()
+        activePingConnection?.stateUpdateHandler = nil
+        activePingConnection?.cancel()
         pathMonitor.cancel()
     }
 
@@ -299,7 +304,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.kind = detectedKind
+                self.setIfChanged(\.kind, to: detectedKind)
                 self.refreshStaticTelemetry()
             }
         }
@@ -311,14 +316,17 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         liveSamplerTimer = nil
         prevBytes = nil
 
-        guard visible else { return }
+        guard visible else {
+            cancelActivePing()
+            return
+        }
 
         refreshStaticTelemetry()
         sampleThroughput()
         measurePing()
 
         liveSampleTick = 0
-        liveSamplerTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        let liveTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.sampleThroughput()
@@ -329,40 +337,51 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
                 }
             }
         }
+        liveTimer.tolerance = 0.2
+        liveSamplerTimer = liveTimer
     }
 
     func refreshStaticTelemetry() {
         refreshWifiAndIP()
     }
 
+    private func setIfChanged<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<NetworkMonitor, T>, to value: T) {
+        if self[keyPath: keyPath] != value {
+            self[keyPath: keyPath] = value
+        }
+    }
+
     private func refreshWifiAndIP() {
         if let iface = CWWiFiClient.shared().interface() {
-            wifiPowerOn = iface.powerOn()
+            let powerOn = iface.powerOn()
+            setIfChanged(\.wifiPowerOn, to: powerOn)
             if let bsd = iface.interfaceName {
-                interfaceName = bsd
+                setIfChanged(\.interfaceName, to: bsd)
             }
-            if wifiPowerOn, (kind == .wifi || iface.rssiValue() < 0) {
+            if powerOn, (kind == .wifi || iface.rssiValue() < 0) {
                 let r = iface.rssiValue()
-                rssi = r < 0 ? r : nil
+                let nextRssi = r < 0 ? r : nil
+                setIfChanged(\.rssi, to: nextRssi)
                 let n = iface.noiseMeasurement()
-                noiseDbm = n < 0 ? n : nil
+                setIfChanged(\.noiseDbm, to: n < 0 ? n : nil)
 
                 let tx = iface.transmitRate()
-                linkRateMbps = (tx.isFinite && tx > 0) ? tx : nil
+                setIfChanged(\.linkRateMbps, to: (tx.isFinite && tx > 0) ? tx : nil)
 
-                ssid = iface.ssid()
-                bssid = iface.bssid()
-                countryCode = iface.countryCode()
+                let nextSSID = iface.ssid()
+                setIfChanged(\.ssid, to: nextSSID)
+                setIfChanged(\.bssid, to: iface.bssid())
+                setIfChanged(\.countryCode, to: iface.countryCode())
 
                 let ch = iface.wlanChannel()
-                channelNumber = ch?.channelNumber
-                band = Self.displayBand(ch?.channelBand)
-                channelWidth = Self.displayWidth(ch?.channelWidth)
-                phyMode = Self.displayPHY(iface.activePHYMode())
-                securityText = Self.displaySecurity(iface.security())
+                setIfChanged(\.channelNumber, to: ch?.channelNumber)
+                setIfChanged(\.band, to: Self.displayBand(ch?.channelBand))
+                setIfChanged(\.channelWidth, to: Self.displayWidth(ch?.channelWidth))
+                setIfChanged(\.phyMode, to: Self.displayPHY(iface.activePHYMode()))
+                setIfChanged(\.securityText, to: Self.displaySecurity(iface.security()))
 
                 let auth = locationManager.authorizationStatus
-                needsLocationPermission = (rssi != nil && ssid == nil && auth != .authorizedAlways)
+                setIfChanged(\.needsLocationPermission, to: nextRssi != nil && nextSSID == nil && auth != .authorizedAlways)
             } else {
                 clearWirelessFields()
             }
@@ -371,28 +390,31 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         }
 
         let ipInfo = Self.readSystemNetworkDetails()
-        localIP = ipInfo.ipv4 ?? Self.readLocalIPv4() ?? "—"
-        ipv6Address = ipInfo.ipv6
-        routerIP = ipInfo.router
-        dnsServers = ipInfo.dns
+        let fallbackIPs: (ipv4: String?, ipv6: String?)? = (ipInfo.ipv4 == nil || ipInfo.ipv6 == nil)
+            ? Self.readLocalIPAddresses()
+            : nil
+        setIfChanged(\.localIP, to: ipInfo.ipv4 ?? fallbackIPs?.ipv4 ?? "—")
+        setIfChanged(\.ipv6Address, to: ipInfo.ipv6 ?? fallbackIPs?.ipv6)
+        setIfChanged(\.routerIP, to: ipInfo.router)
+        setIfChanged(\.dnsServers, to: ipInfo.dns)
         if let primaryIface = ipInfo.interfaceName {
-            interfaceName = primaryIface
+            setIfChanged(\.interfaceName, to: primaryIface)
         }
     }
 
     private func clearWirelessFields() {
-        rssi = nil
-        noiseDbm = nil
-        linkRateMbps = nil
-        ssid = nil
-        bssid = nil
-        band = nil
-        channelNumber = nil
-        channelWidth = nil
-        phyMode = nil
-        securityText = nil
-        countryCode = nil
-        needsLocationPermission = false
+        setIfChanged(\.rssi, to: nil)
+        setIfChanged(\.noiseDbm, to: nil)
+        setIfChanged(\.linkRateMbps, to: nil)
+        setIfChanged(\.ssid, to: nil)
+        setIfChanged(\.bssid, to: nil)
+        setIfChanged(\.band, to: nil)
+        setIfChanged(\.channelNumber, to: nil)
+        setIfChanged(\.channelWidth, to: nil)
+        setIfChanged(\.phyMode, to: nil)
+        setIfChanged(\.securityText, to: nil)
+        setIfChanged(\.countryCode, to: nil)
+        setIfChanged(\.needsLocationPermission, to: false)
     }
 
     private static func displayBand(_ band: CWChannelBand?) -> String? {
@@ -459,6 +481,9 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
 
     // MARK: - SCDynamicStore Gateway, DNS, IPv4 & IPv6
 
+    private static let dynamicStore: SCDynamicStore? =
+        SCDynamicStoreCreate(nil, "TrinityBar" as CFString, nil, nil)
+
     private static func readSystemNetworkDetails() -> (
         interfaceName: String?,
         ipv4: String?,
@@ -466,10 +491,10 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         router: String?,
         dns: String?
     ) {
-        guard let store = SCDynamicStoreCreate(nil, "TrinityBar" as CFString, nil, nil),
+        guard let store = dynamicStore,
               let globalIPv4 = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any]
         else {
-            return (nil, nil, readLocalIPv6(), nil, nil)
+            return (nil, nil, nil, nil, nil)
         }
 
         let primaryService = globalIPv4["PrimaryService"] as? String
@@ -497,17 +522,14 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
             }
         }
 
-        if ipv6 == nil {
-            ipv6 = readLocalIPv6()
-        }
         return (primaryIface, ipv4, ipv6, router, dns)
     }
 
     private func sampleThroughput() {
         guard kind != .offline else {
             prevBytes = nil
-            downloadBytesPerSec = 0
-            uploadBytesPerSec = 0
+            setIfChanged(\.downloadBytesPerSec, to: 0)
+            setIfChanged(\.uploadBytesPerSec, to: 0)
             return
         }
 
@@ -517,21 +539,29 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
             let dt = max(0.2, now - prev.time)
             let dRx = counters.rx >= prev.rx ? Double(counters.rx - prev.rx) : 0
             let dTx = counters.tx >= prev.tx ? Double(counters.tx - prev.tx) : 0
-            downloadBytesPerSec = dRx / dt
-            uploadBytesPerSec = dTx / dt
+            setIfChanged(\.downloadBytesPerSec, to: dRx / dt)
+            setIfChanged(\.uploadBytesPerSec, to: dTx / dt)
         }
         prevBytes = (counters.rx, counters.tx, now)
     }
 
+    private func cancelActivePing() {
+        activePingConnection?.stateUpdateHandler = nil
+        activePingConnection?.cancel()
+        activePingConnection = nil
+    }
+
     private func measurePing() {
+        cancelActivePing()
         guard kind != .offline else {
-            pingMs = nil
+            setIfChanged(\.pingMs, to: nil)
             return
         }
 
         let target = preferredLatencyEndpoint()
         let start = DispatchTime.now()
         let conn = NWConnection(host: target.host, port: target.port, using: .tcp)
+        activePingConnection = conn
         let queue = pingQueue
 
         conn.stateUpdateHandler = { [weak self] state in
@@ -542,21 +572,29 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
                 conn.stateUpdateHandler = nil
                 conn.cancel()
                 Task { @MainActor [weak self] in
-                    guard let self, self.kind != .offline else { return }
-                    self.pingMs = ms
+                    guard let self else { return }
+                    if self.activePingConnection === conn { self.activePingConnection = nil }
+                    guard self.kind != .offline else { return }
+                    self.setIfChanged(\.pingMs, to: ms)
                 }
             case .failed:
                 conn.stateUpdateHandler = nil
                 conn.cancel()
+                Task { @MainActor [weak self] in
+                    if self?.activePingConnection === conn { self?.activePingConnection = nil }
+                }
             default:
                 break
             }
         }
         conn.start(queue: queue)
 
-        queue.asyncAfter(deadline: .now() + 2.5) {
+        queue.asyncAfter(deadline: .now() + 2.5) { [weak self] in
             conn.stateUpdateHandler = nil
             conn.cancel()
+            Task { @MainActor [weak self] in
+                if self?.activePingConnection === conn { self?.activePingConnection = nil }
+            }
         }
     }
 
@@ -595,75 +633,57 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         return true
     }
 
-    private static func readLocalIPv4() -> String? {
+    private static func readLocalIPAddresses() -> (ipv4: String?, ipv6: String?) {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return nil }
+        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return (nil, nil) }
         defer { freeifaddrs(ifaddr) }
 
-        var fallback: String?
+        var preferredV4: String?
+        var fallbackV4: String?
+        var preferredV6: String?
+        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
         var ptr: UnsafeMutablePointer<ifaddrs>? = firstAddr
+
         while let current = ptr {
             let interface = current.pointee
-            if let addr = interface.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) {
-                let name = String(cString: interface.ifa_name)
-                if name != "lo0" {
-                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(
-                        addr,
-                        socklen_t(addr.pointee.sa_len),
-                        &hostname,
-                        socklen_t(hostname.count),
-                        nil,
-                        0,
-                        NI_NUMERICHOST
-                    ) == 0 {
-                        let ip = String(decoding: hostname.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-                        if name == "en0" || name == "en1" {
-                            return ip
-                        }
-                        if fallback == nil {
-                            fallback = ip
-                        }
-                    }
-                }
-            }
-            ptr = interface.ifa_next
-        }
-        return fallback
-    }
+            if let addr = interface.ifa_addr {
+                let family = addr.pointee.sa_family
+                if family == UInt8(AF_INET) || family == UInt8(AF_INET6) {
+                    let name = String(cString: interface.ifa_name)
+                    let isPrimary = (name == "en0" || name == "en1")
+                    let needsV4 = (family == UInt8(AF_INET)) && (preferredV4 == nil) && (name != "lo0")
+                    let needsV6 = (family == UInt8(AF_INET6)) && (preferredV6 == nil) && isPrimary
 
-    private static func readLocalIPv6() -> String? {
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr else { return nil }
-        defer { freeifaddrs(ifaddr) }
-
-        var ptr: UnsafeMutablePointer<ifaddrs>? = firstAddr
-        while let current = ptr {
-            let interface = current.pointee
-            if let addr = interface.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET6) {
-                let name = String(cString: interface.ifa_name)
-                if name == "en0" || name == "en1" {
-                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    if getnameinfo(
-                        addr,
-                        socklen_t(addr.pointee.sa_len),
-                        &hostname,
-                        socklen_t(hostname.count),
-                        nil,
-                        0,
-                        NI_NUMERICHOST
-                    ) == 0 {
+                    if (needsV4 || needsV6),
+                       getnameinfo(
+                           addr,
+                           socklen_t(addr.pointee.sa_len),
+                           &hostname,
+                           socklen_t(hostname.count),
+                           nil,
+                           0,
+                           NI_NUMERICHOST
+                       ) == 0 {
                         let raw = String(decoding: hostname.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-                        let clean = raw.components(separatedBy: "%").first ?? raw
-                        if !clean.lowercased().hasPrefix("fe80:") {
-                            return clean
+                        if family == UInt8(AF_INET) {
+                            if isPrimary {
+                                preferredV4 = raw
+                            } else if fallbackV4 == nil {
+                                fallbackV4 = raw
+                            }
+                        } else {
+                            let clean = raw.components(separatedBy: "%").first ?? raw
+                            if !clean.lowercased().hasPrefix("fe80:") {
+                                preferredV6 = clean
+                            }
                         }
                     }
                 }
             }
+            if preferredV4 != nil && preferredV6 != nil { break }
             ptr = interface.ifa_next
         }
-        return nil
+        return (preferredV4 ?? fallbackV4, preferredV6)
     }
 
     private static func readInterfaceBytes() -> (rx: UInt64, tx: UInt64)? {

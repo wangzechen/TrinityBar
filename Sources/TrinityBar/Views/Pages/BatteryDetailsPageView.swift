@@ -163,19 +163,26 @@ private struct BatteryPowerFlowDiagram: View {
         let label: String
         let symbol: String
         let watts: Double
+        let hasLiveReading: Bool
         let color: Color
     }
 
-    private var sourceNode: (label: String, detail: String?, symbol: String, watts: Double, color: Color, isSilver: Bool) {
+    private var hasLivePowerReading: Bool {
+        battery.adapterInputWatts != nil || battery.systemLoadWatts != nil || battery.wattage != nil
+    }
+
+    private var sourceNode: (label: String, detail: String?, symbol: String, watts: Double, hasLiveReading: Bool, color: Color, isSilver: Bool) {
         if battery.isPluggedIn {
+            let live = hasLivePowerReading
             let w = battery.adapterInputWatts
                 ?? max(0.5, (battery.systemLoadWatts ?? 4.0) + max(0.0, battery.wattage ?? 0.0))
             let detail = battery.adapterRatedWatts.map { "\($0)W Max" }
-            return ("Adapter", detail, "powerplug.fill", w, .primary, true)
+            return ("Adapter", detail, "powerplug.fill", w, live, .primary, true)
         } else {
+            let live = hasLivePowerReading
             let discharge = abs(min(0.0, battery.wattage ?? -(battery.systemLoadWatts ?? 5.0)))
             let w = max(0.5, discharge > 0 ? discharge : (battery.systemLoadWatts ?? 5.0))
-            return ("Battery", "\(battery.percentage)%", "battery.100percent", w, .orange, false)
+            return ("Battery", "\(battery.percentage)%", "battery.100percent", w, live, .orange, false)
         }
     }
 
@@ -183,7 +190,7 @@ private struct BatteryPowerFlowDiagram: View {
         var list: [BranchNode] = []
         let chgWatts = battery.isPluggedIn ? max(0.0, battery.wattage ?? 0.0) : 0.0
         if chgWatts >= 0.2 {
-            list.append(BranchNode(id: "chg", label: "Charging", symbol: "battery.100percent.bolt", watts: chgWatts, color: .green))
+            list.append(BranchNode(id: "chg", label: "Charging", symbol: "battery.100percent.bolt", watts: chgWatts, hasLiveReading: true, color: .green))
         }
 
         let dispW = max(0.0, battery.displayWatts ?? 0.0)
@@ -191,12 +198,12 @@ private struct BatteryPowerFlowDiagram: View {
         let totalSys = battery.systemLoadWatts ?? max(1.0, sourceNode.watts - chgWatts)
         let coreSys = max(0.5, totalSys - dispW - usbW)
 
-        list.append(BranchNode(id: "sys", label: "System", symbol: "cpu", watts: coreSys, color: .blue))
+        list.append(BranchNode(id: "sys", label: "System", symbol: "cpu", watts: coreSys, hasLiveReading: hasLivePowerReading, color: .blue))
         if dispW >= 0.15 {
-            list.append(BranchNode(id: "disp", label: "Display", symbol: "display", watts: dispW, color: .indigo))
+            list.append(BranchNode(id: "disp", label: "Display", symbol: "display", watts: dispW, hasLiveReading: true, color: .indigo))
         }
         if usbW >= 0.10 {
-            list.append(BranchNode(id: "usb", label: "USB Ports", symbol: "cable.connector", watts: usbW, color: .orange))
+            list.append(BranchNode(id: "usb", label: "USB Ports", symbol: "cable.connector", watts: usbW, hasLiveReading: true, color: .orange))
         }
         return list
     }
@@ -279,7 +286,7 @@ private struct BatteryPowerFlowDiagram: View {
                 Image(systemName: src.symbol)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(src.color)
-                Text(String(format: "%.1f W", src.watts))
+                Text(src.hasLiveReading ? String(format: "%.1f W", src.watts) : "—")
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                 Text(src.label)
@@ -292,21 +299,15 @@ private struct BatteryPowerFlowDiagram: View {
                 }
             }
             .frame(width: leftCardW, height: sourceHeight)
-            .background(
-                src.isSilver
+            .glassCardSurface(
+                fill: src.isSilver
                     ? Color.primary.opacity(colorScheme == .dark ? 0.11 : 0.07)
                     : src.color.opacity(0.18),
-                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                stroke: src.isSilver
+                    ? Color.primary.opacity(colorScheme == .dark ? 0.24 : 0.16)
+                    : src.color.opacity(0.32),
+                cornerRadius: 11
             )
-            .overlay {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(
-                        src.isSilver
-                            ? Color.primary.opacity(colorScheme == .dark ? 0.24 : 0.16)
-                            : src.color.opacity(0.32),
-                        lineWidth: 1
-                    )
-            }
             .position(x: leftCardW / 2.0, y: midY)
 
             // Right Destination Branch Cards
@@ -319,7 +320,7 @@ private struct BatteryPowerFlowDiagram: View {
                             .font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(node.color)
                             .frame(width: 16)
-                        Text(String(format: "%.1f W", node.watts))
+                        Text(node.hasLiveReading ? String(format: "%.1f W", node.watts) : "—")
                             .font(.system(size: 11.5, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .lineLimit(1)
@@ -333,11 +334,7 @@ private struct BatteryPowerFlowDiagram: View {
                 }
                 .padding(.horizontal, 6)
                 .frame(width: rightCardW, height: cardH)
-                .background(node.color.opacity(0.18), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(node.color.opacity(0.32), lineWidth: 1)
-                }
+                .glassCardSurface(fill: node.color.opacity(0.18), stroke: node.color.opacity(0.32))
                 .position(x: w - rightCardW / 2.0, y: centersY[idx])
             }
         }

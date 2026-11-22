@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var appearanceObservation: NSKeyValueObservation?
     private var boundsObservation: NSKeyValueObservation?
     private var wakeObserver: NSObjectProtocol?
+    private var wakeRefreshTask: Task<Void, Never>?
     private var statusBarLocalScrollMonitor: Any?
     private var statusBarGlobalScrollMonitor: Any?
     private var lastRenderedKey: RenderedStatusIconKey?
@@ -131,6 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        wakeRefreshTask?.cancel()
+        wakeRefreshTask = nil
         removeStatusBarScrollMonitors()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
@@ -151,9 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               rect.insetBy(dx: -2, dy: -2).contains(mouseLocation) else {
             return false
         }
-        if abs(dy) > 0.05 {
-            let rawScaled = isPrecise ? dy * 0.0003 : dy * 0.01
-            let scaled = min(0.08, max(-0.08, rawScaled))
+        if let scaled = StatusFloatingPanel.scaledVolumeDelta(dy: dy, isPrecise: isPrecise) {
             if audio.isMuted && scaled < 0 { return true }
             audio.setVolume(audio.volume + Float(scaled))
         }
@@ -163,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func syncStatusBarScrollMonitors(enabled: Bool) {
         if enabled {
             statusItem?.button?.toolTip = "TrinityBar — Battery, Network & Sound (Scroll: Volume, ⌥-Click: Mute)"
+            statusItem?.button?.setAccessibilityHelp("Click to open dashboard, scroll to adjust volume, or Option-click to mute.")
             if statusBarGlobalScrollMonitor == nil {
                 statusBarGlobalScrollMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
                     let dy = event.scrollingDeltaY
@@ -186,6 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             statusItem?.button?.toolTip = "TrinityBar — Battery, Network & Sound"
+            statusItem?.button?.setAccessibilityHelp("Click to open dashboard.")
             removeStatusBarScrollMonitors()
         }
     }
@@ -221,13 +224,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusIcon(force: true)
 
         // Follow-up refresh once Wi-Fi DHCP and Bluetooth audio profiles finish reconnecting
-        Task { @MainActor [weak self] in
+        wakeRefreshTask?.cancel()
+        wakeRefreshTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(2))
-            guard let self else { return }
+            guard !Task.isCancelled, let self else { return }
             self.battery.refresh()
             self.network.refreshStaticTelemetry()
             self.audio.refresh()
             self.updateStatusIcon(force: true)
+            self.wakeRefreshTask = nil
         }
     }
 
@@ -378,7 +383,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !force, key == lastRenderedKey {
             return
         }
-        lastRenderedKey = key
 
         // Reserve horizontal menu bar slot with a transparent placeholder image
         if lastPlaceholderSize != targetSize {
@@ -393,6 +397,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scale: scale,
             appearance: button.effectiveAppearance
         ) {
+            lastRenderedKey = key
             templateImageView?.image = layers.templateBase
             if let overlayCG = layers.chromaticOverlay {
                 let colorImg = NSImage(cgImage: overlayCG, size: NSSize(width: targetSize, height: targetSize))

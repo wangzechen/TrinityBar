@@ -223,14 +223,10 @@ struct SoundInfoBarSection: View {
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity)
             .frame(height: 40)
-            .background(
-                Color.accentColor.opacity(0.12),
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .glassCardSurface(
+                fill: Color.accentColor.opacity(0.12),
+                stroke: Color.accentColor.opacity(0.26)
             )
-            .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.accentColor.opacity(0.26), lineWidth: 1)
-            }
         }
     }
 }

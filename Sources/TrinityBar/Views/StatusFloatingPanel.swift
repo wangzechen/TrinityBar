@@ -13,6 +13,12 @@ final class StatusFloatingPanel: NSPanel {
     static let menuBarGap: CGFloat = 6
     static let screenMargin: CGFloat = 8
 
+    static func scaledVolumeDelta(dy: CGFloat, isPrecise: Bool) -> CGFloat? {
+        guard abs(dy) > 0.05 else { return nil }
+        let raw = isPrecise ? dy * 0.0003 : dy * 0.01
+        return min(0.08, max(-0.08, raw))
+    }
+
     var onClose: (() -> Void)?
     var onScrollDeltaY: ((CGFloat) -> Void)?
     var onEscapePressed: (() -> Bool)?
@@ -173,6 +179,7 @@ final class StatusFloatingPanel: NSPanel {
         let screenRect = buttonWindow.convertToScreen(rectInWindow)
         self.anchorButtonScreenRect = screenRect
 
+        rebuildBackdrop(force: false)
         applyFittingFrame(animated: false)
 
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
@@ -192,6 +199,7 @@ final class StatusFloatingPanel: NSPanel {
             }
         }
 
+        NSAccessibility.post(element: self, notification: .focusedWindowChanged)
         installEventMonitors()
     }
 
@@ -300,12 +308,9 @@ final class StatusFloatingPanel: NSPanel {
             MainActor.assumeIsolated {
                 guard let self, event.window === self else { return }
                 let dy = event.scrollingDeltaY
-                if abs(dy) > 0.05 {
-                    let rawScaled = event.hasPreciseScrollingDeltas ? dy * 0.0003 : dy * 0.01
-                    let scaled = min(0.08, max(-0.08, rawScaled))
-                    if self.allowsScrollVolume?() ?? true {
-                        self.onScrollDeltaY?(scaled)
-                    }
+                if let scaled = Self.scaledVolumeDelta(dy: dy, isPrecise: event.hasPreciseScrollingDeltas),
+                   self.allowsScrollVolume?() ?? true {
+                    self.onScrollDeltaY?(scaled)
                 }
             }
             return event

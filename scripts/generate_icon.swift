@@ -35,7 +35,7 @@ func renderMinimalistIconPNG(pixelSize: Int = 1024) throws -> Data {
     let dim = CGFloat(pixelSize)
     let scale = dim / 1024.0
 
-    let rep = NSBitmapImageRep(
+    guard let rep = NSBitmapImageRep(
         bitmapDataPlanes: nil,
         pixelsWide: pixelSize,
         pixelsHigh: pixelSize,
@@ -46,10 +46,15 @@ func renderMinimalistIconPNG(pixelSize: Int = 1024) throws -> Data {
         colorSpaceName: .deviceRGB,
         bytesPerRow: pixelSize * 4,
         bitsPerPixel: 32
-    )!
+    ) else {
+        throw NSError(domain: "GenerateIcon", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate bitmap"])
+    }
 
     NSGraphicsContext.saveGraphicsState()
-    let nsCtx = NSGraphicsContext(bitmapImageRep: rep)!
+    guard let nsCtx = NSGraphicsContext(bitmapImageRep: rep) else {
+        NSGraphicsContext.restoreGraphicsState()
+        throw NSError(domain: "GenerateIcon", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to create graphics context"])
+    }
     NSGraphicsContext.current = nsCtx
     let ctx = nsCtx.cgContext
 
