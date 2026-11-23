@@ -33,6 +33,20 @@ final class CaffeinateManager: ObservableObject {
     nonisolated(unsafe) private var countdownTimer: Timer?
     private var expiresAt: Date?
 
+    /// True while the dashboard panel is on screen. The countdown then ticks every second;
+    /// otherwise it refreshes about once a minute so a long session doesn't wake the app every second.
+    /// Expiry is always scheduled from `expiresAt`, so it fires on time either way.
+    var isDisplayActive: Bool = false {
+        didSet {
+            guard isDisplayActive != oldValue else { return }
+            if isDisplayActive {
+                handleCountdownTick()
+            } else if isKeepingAwake, let expiresAt {
+                scheduleNextTick(remaining: expiresAt.timeIntervalSinceNow)
+            }
+        }
+    }
+
     init() {
         let savedRaw = UserDefaults.standard.object(forKey: Self.durationDefaultsKey) as? Int
         self.selectedDuration = savedRaw.flatMap(CaffeinateDuration.init(rawValue:)) ?? .indefinite
@@ -109,9 +123,13 @@ final class CaffeinateManager: ObservableObject {
         countdownTimer = nil
         guard isKeepingAwake, remaining > 0 else { return }
 
+        let perSecond = isDisplayActive || remaining <= 60.0
         let interval: TimeInterval
-        if remaining <= 60.0 {
-            interval = min(1.0, remaining)
+        if perSecond {
+            // Land just past the next whole-second boundary so ceil(remaining) has stepped down.
+            let frac = remaining - floor(remaining)
+            let toBoundary = frac > 0.02 ? frac + 0.01 : 1.01
+            interval = min(toBoundary, remaining)
         } else {
             let mod = remaining.truncatingRemainder(dividingBy: 60.0)
             let toBoundary = mod > 0.25 ? mod : 60.0
@@ -123,7 +141,7 @@ final class CaffeinateManager: ObservableObject {
                 self?.handleCountdownTick()
             }
         }
-        timer.tolerance = remaining <= 60.0 ? 0.15 : min(1.0, interval * 0.1)
+        timer.tolerance = perSecond ? 0.05 : min(1.0, interval * 0.1)
         RunLoop.main.add(timer, forMode: .common)
         countdownTimer = timer
     }
@@ -159,16 +177,17 @@ final class CaffeinateManager: ObservableObject {
         }
     }
 
+    /// Clock-style countdown: `H:MM:SS` with at least an hour left, otherwise `M:SS`.
     nonisolated static func formatRemaining(seconds: Int) -> String {
-        if seconds < 60 {
-            return "\(seconds)s"
-        }
-        let totalMinutes = (seconds + 59) / 60
-        let hours = totalMinutes / 60
-        let mins = totalMinutes % 60
+        let total = max(0, seconds)
+        let hours = total / 3600
+        let mins = (total % 3600) / 60
+        let secs = total % 60
+        let ss = secs < 10 ? "0\(secs)" : "\(secs)"
         if hours > 0 {
-            return mins > 0 ? "\(hours)h \(mins)m" : "\(hours)h"
+            let mm = mins < 10 ? "0\(mins)" : "\(mins)"
+            return "\(hours):\(mm):\(ss)"
         }
-        return "\(mins)m"
+        return "\(mins):\(ss)"
     }
 }

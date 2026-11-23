@@ -390,6 +390,8 @@ private struct SettingsDrawerSection<Preview: View>: View {
                         Text(caffeinate.remainingBadgeText.map { "Awake · \($0)" } ?? "Awake")
                             .font(.system(size: 10, weight: .medium))
                             .monospacedDigit()
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     .foregroundStyle(Color.orange)
                     .padding(.horizontal, 5)

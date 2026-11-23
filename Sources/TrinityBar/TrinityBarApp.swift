@@ -104,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.network.setPopoverVisible(false)
             self.battery.setPopoverVisible(false)
+            self.caffeinate.isDisplayActive = false
             self.settings.route = .summary
             self.settings.summarySettingsExpanded = false
         }
@@ -455,6 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             battery.setPopoverVisible(true)
             network.setPopoverVisible(true)
             panel.present(below: sender)
+            caffeinate.isDisplayActive = panel.isVisible
         }
     }
 
