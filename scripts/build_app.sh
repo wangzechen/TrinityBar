@@ -125,7 +125,7 @@ echo "Packaged successfully at: $APP_DIR (v$VERSION, build $BUILD_NUMBER)"
 if [[ "${1:-}" == "--release" ]]; then
     ARCHIVE_NAME="TrinityBar-v${VERSION}-macos-arm64.zip"
     ARCHIVE_PATH="$DIST_DIR/$ARCHIVE_NAME"
-    rm -f "$DIST_DIR"/TrinityBar-v*-macos-arm64.zip "$DIST_DIR"/TrinityBar-v*-macos-arm64.zip.sha256
+    rm -f "$DIST_DIR"/TrinityBar-v*-macos-arm64.zip(N) "$DIST_DIR"/TrinityBar-v*-macos-arm64.zip.sha256(N)
     ditto -c -k --keepParent "$APP_DIR" "$ARCHIVE_PATH"
     (cd "$DIST_DIR" && shasum -a 256 "$ARCHIVE_NAME" > "${ARCHIVE_NAME}.sha256")
     (cd "$DIST_DIR" && shasum -a 256 -c "${ARCHIVE_NAME}.sha256" >/dev/null)
