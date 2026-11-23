@@ -69,7 +69,7 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
 - **macOS 26.0+**
 
 ### Option 1: Download Pre-built Release *(Recommended)*
-1. Download **`TrinityBar-v1.1.3-macos-arm64.zip`** from the [**Latest GitHub Release**](https://github.com/wangzechen/TrinityBar/releases/latest).
+1. Download **`TrinityBar-v<version>-macos-arm64.zip`** from the [**Latest GitHub Release**](https://github.com/wangzechen/TrinityBar/releases/latest).
 2. Extract the archive and drag **`TrinityBar.app`** into **`/Applications`**.
 3. Because the binary is ad-hoc signed without a paid Apple Developer ID certificate, clear macOS Gatekeeper's download quarantine flag once before first launch:
    ```zsh
@@ -118,11 +118,12 @@ TrinityBar/
 ├── Package.swift                            # SwiftPM manifest (macOS 26.0+)
 ├── README.md                                # Product overview, usage & build guide
 ├── ARCHITECTURE.md                          # System design, rendering mechanics & extension guide
+├── version.env                              # Single source of truth: MARKETING_VERSION & BUILD_NUMBER
 ├── assets/
 │   ├── dashboard-summary.png                # Collapsed summary dashboard screenshot (generated)
 │   └── dashboard-settings.png               # Expanded settings drawer screenshot (generated)
 ├── scripts/
-│   ├── build_app.sh                         # Size-optimized swiftc bundler -> dist/TrinityBar.app (v1.1.3)
+│   ├── build_app.sh                         # Size-optimized swiftc bundler -> dist/TrinityBar.app
 │   ├── generate_icon.swift                  # Deterministic 66 KB 1024x1024 AppIcon.icns generator
 │   ├── capture_screenshots.sh               # Regenerates assets/ screenshots with privacy-safe demo network data
 │   └── frame_screenshot.swift               # Rounded-card framing for captured screenshots

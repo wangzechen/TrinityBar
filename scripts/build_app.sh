@@ -4,8 +4,17 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
-VERSION="1.1.3"
-BUILD_NUMBER="5"
+VERSION_FILE="$PROJECT_DIR/version.env"
+if [[ ! -f "$VERSION_FILE" ]]; then
+    echo "Error: $VERSION_FILE not found" >&2
+    exit 1
+fi
+source "$VERSION_FILE"
+if [[ -z "${MARKETING_VERSION:-}" || -z "${BUILD_NUMBER:-}" ]]; then
+    echo "Error: MARKETING_VERSION and BUILD_NUMBER must be set in $VERSION_FILE" >&2
+    exit 1
+fi
+VERSION="$MARKETING_VERSION"
 DIST_DIR="$PROJECT_DIR/dist"
 APP_DIR="$DIST_DIR/TrinityBar.app"
 CONTENTS_DIR="$APP_DIR/Contents"
