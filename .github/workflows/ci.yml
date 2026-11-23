@@ -24,6 +24,9 @@ jobs:
       - name: Build app bundle (swiftc single module, strict concurrency, warnings as errors)
         run: ./scripts/build_app.sh
 
+      - name: Docs consistency (README tree, no hard-coded versions, documented sizes)
+        run: ./scripts/check_docs.sh
+
       - name: SwiftPM build
         run: swift build
 

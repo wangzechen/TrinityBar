@@ -45,7 +45,7 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
 
 ### 3. Native Control Center Auto-Hide & Collapsible Settings
 - **Hide Native Icons** *(enabled by default, persisted across restarts)*: Snapshots your existing macOS Control Center `WiFi`, `Battery`, and `Sound` menu bar visibility states before hiding them, and restores your exact pre-TrinityBar layout when toggled off or when TrinityBar exits (`Quit`, `⌘Q`, `SIGTERM`, `SIGINT`).
-- **Collapsible Settings Drawer**: Houses `Volume Bar` (`Dots / Arc / None`) with a live emblem preview, `Top % Number`, `Icon Volume Control` (scroll-to-volume & `⌥`-Click mute on the menu bar icon), `Hide Native Icons`, `Launch at Login` (`SMAppService.mainApp`), timed `Keep Awake` (`30m / 1h / 2h / ∞` via `IOPMAssertion` with live countdown badge), and `Quit TrinityBar`, animated smoothly with zero frame-0 jump.
+- **Collapsible Settings Drawer**: Houses `Volume Bar` (`Dots / Arc / None`) with a live emblem preview, `Top % Number`, `Icon Volume Control` (scroll-to-volume & `⌥`-Click mute on the menu bar icon), `Hide Native Icons`, `Launch at Login` (`SMAppService.mainApp`), timed `Keep Awake` (`30m / 1h / 2h / ∞` via `IOPMAssertion`, with a clock-style `29:59` / `1:29:59` countdown badge that ticks every second while the dashboard is open), and `Quit TrinityBar`, animated smoothly with zero frame-0 jump.
 
 ---
 
@@ -89,6 +89,8 @@ cp -R dist/TrinityBar.app /Applications/
 open /Applications/TrinityBar.app
 ```
 
+Contributors can run the unit tests with `swift test` (see [ARCHITECTURE.md §2.6](./ARCHITECTURE.md#26-testing--continuous-integration-tests-githubworkflows)); releases follow [RELEASING.md](./RELEASING.md).
+
 > **Location Permission for Wi-Fi SSID**: macOS redacts Wi-Fi `SSID` and `BSSID` strings unless Location Services access is granted to the `.app` bundle. Open the **Wi-Fi** detail page inside TrinityBar and click the blue **Allow Location Access** banner if you want network names displayed.
 
 ### Uninstall & Preferences Reset
@@ -116,18 +118,20 @@ Quitting TrinityBar normally (`Quit TrinityBar`, `⌘Q`, or `SIGTERM`) automatic
 ```text
 TrinityBar/
 ├── .github/workflows/
-│   ├── ci.yml                               # build_app.sh + swift build + swift test on every push/PR
+│   ├── ci.yml                               # build_app.sh + check_docs.sh + swift build + swift test on every push/PR
 │   └── release.yml                          # v* tag -> verify version.env -> draft GitHub release
 ├── LICENSE                                  # MIT License
 ├── Package.swift                            # SwiftPM manifest (macOS 26.0+)
 ├── README.md                                # Product overview, usage & build guide
 ├── ARCHITECTURE.md                          # System design, rendering mechanics & extension guide
+├── RELEASING.md                             # Release checklist: tests, in-app checks, docs review, tagging
 ├── version.env                              # Single source of truth: MARKETING_VERSION & BUILD_NUMBER
 ├── assets/
 │   ├── dashboard-summary.png                # Collapsed summary dashboard screenshot (generated)
 │   └── dashboard-settings.png               # Expanded settings drawer screenshot (generated)
 ├── scripts/
 │   ├── build_app.sh                         # Size-optimized swiftc bundler -> dist/TrinityBar.app
+│   ├── check_docs.sh                        # CI check: README tree, no hard-coded versions, documented sizes
 │   ├── generate_icon.swift                  # Deterministic 66 KB 1024x1024 AppIcon.icns generator
 │   ├── capture_screenshots.sh               # Regenerates assets/ screenshots with privacy-safe demo network data
 │   └── frame_screenshot.swift               # Rounded-card framing for captured screenshots
@@ -156,6 +160,12 @@ TrinityBar/
             ├── NetworkDetailsPageView.swift # Wi-Fi scanner + expandable link telemetry
             └── SoundDetailsPageView.swift   # CoreAudio Output/Input switcher + audio stream telemetry
 └── Tests/TrinityBarTests/                   # XCTest unit tests for pure logic (`swift test`)
+    ├── BatteryAlertLevelTests.swift         # Charging / critical / low / normal thresholds
+    ├── CaffeinateFormatTests.swift          # Keep Awake M:SS / H:MM:SS countdown formatting
+    ├── RoutablePublicIPTests.swift          # Latency-probe public vs private / CGNAT / ULA address filter
+    ├── StatusFloatingPanelTests.swift       # Scroll-to-volume scaling & panel placement geometry
+    ├── TrinityStatusIconRendererTests.swift # Menu bar layers for every mode × connection × charging state
+    └── WiFiSignalTests.swift                # RSSI -> bars and SF Symbol variable value
 ```
 
 ---
