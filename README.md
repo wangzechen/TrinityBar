@@ -1,5 +1,6 @@
 # TrinityBar
 
+[![CI](https://github.com/wangzechen/TrinityBar/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wangzechen/TrinityBar/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/wangzechen/TrinityBar?color=brightgreen)](https://github.com/wangzechen/TrinityBar/releases/latest)
 ![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-black?logo=apple)
 ![Arch](https://img.shields.io/badge/arch-Apple%20Silicon-blue)
@@ -114,6 +115,9 @@ Quitting TrinityBar normally (`Quit TrinityBar`, `⌘Q`, or `SIGTERM`) automatic
 
 ```text
 TrinityBar/
+├── .github/workflows/
+│   ├── ci.yml                               # build_app.sh + swift build + swift test on every push/PR
+│   └── release.yml                          # v* tag -> verify version.env -> draft GitHub release
 ├── LICENSE                                  # MIT License
 ├── Package.swift                            # SwiftPM manifest (macOS 26.0+)
 ├── README.md                                # Product overview, usage & build guide

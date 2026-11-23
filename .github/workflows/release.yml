@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches version.env
+        run: |
+          source version.env
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [[ -z "${MARKETING_VERSION:-}" ]]; then
+            echo "::error::MARKETING_VERSION is missing from version.env"
+            exit 1
+          fi
+          if [[ "$TAG_VERSION" != "$MARKETING_VERSION" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match MARKETING_VERSION=$MARKETING_VERSION in version.env"
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches version.env ($MARKETING_VERSION)"
+
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build release archive
+        run: ./scripts/build_app.sh --release
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ZIP="dist/TrinityBar-${TAG}-macos-arm64.zip"
+          gh release create "$TAG" \
+            --draft \
+            --title "TrinityBar $TAG" \
+            --generate-notes \
+            "$ZIP" "$ZIP.sha256"

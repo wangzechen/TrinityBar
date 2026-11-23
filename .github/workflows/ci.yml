@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build app bundle (swiftc single module, strict concurrency, warnings as errors)
+        run: ./scripts/build_app.sh
+
+      - name: SwiftPM build
+        run: swift build
+
+      - name: Unit tests
+        run: swift test
