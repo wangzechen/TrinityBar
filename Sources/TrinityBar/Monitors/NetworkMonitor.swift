@@ -723,7 +723,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         return (NWEndpoint.Host("captive.apple.com"), 80)
     }
 
-    private static func isRoutablePublicIP(_ ip: String) -> Bool {
+    nonisolated static func isRoutablePublicIP(_ ip: String) -> Bool {
         guard !ip.isEmpty else { return false }
         let lower = ip.lowercased()
         if lower.contains(":") {

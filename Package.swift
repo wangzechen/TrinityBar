@@ -29,6 +29,11 @@ let package = Package(
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("ServiceManagement")
             ]
+        ),
+        .testTarget(
+            name: "TrinityBarTests",
+            dependencies: ["TrinityBar"],
+            path: "Tests/TrinityBarTests"
         )
     ]
 )

@@ -10,8 +10,8 @@ private final class TopPinnedContainerView: NSView {
 @MainActor
 final class StatusFloatingPanel: NSPanel {
     static let cornerRadius: CGFloat = 16
-    static let menuBarGap: CGFloat = 6
-    static let screenMargin: CGFloat = 8
+    nonisolated static let menuBarGap: CGFloat = 6
+    nonisolated static let screenMargin: CGFloat = 8
 
     static func scaledVolumeDelta(dy: CGFloat, isPrecise: Bool) -> CGFloat? {
         guard abs(dy) > 0.05 else { return nil }
@@ -277,7 +277,22 @@ final class StatusFloatingPanel: NSPanel {
     private static func computePanelFrame(panelSize: NSSize, anchorScreenRect: NSRect, horizontalInset: CGFloat) -> NSRect {
         let screen = NSScreen.screens.first(where: { $0.frame.intersects(anchorScreenRect) }) ?? NSScreen.main
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        return panelFrame(
+            panelSize: panelSize,
+            anchorScreenRect: anchorScreenRect,
+            visibleFrame: visible,
+            horizontalInset: horizontalInset
+        )
+    }
 
+    /// Pure geometry: centers the panel under the anchor, clamps it horizontally inside `visibleFrame` (± inset),
+    /// keeps its bottom above `visibleFrame.minY + screenMargin`, and rounds the origin to whole points.
+    nonisolated static func panelFrame(
+        panelSize: NSSize,
+        anchorScreenRect: NSRect,
+        visibleFrame visible: NSRect,
+        horizontalInset: CGFloat
+    ) -> NSRect {
         var x = anchorScreenRect.midX - panelSize.width / 2.0
         x = min(max(x, visible.minX + horizontalInset), visible.maxX - panelSize.width - horizontalInset)
 

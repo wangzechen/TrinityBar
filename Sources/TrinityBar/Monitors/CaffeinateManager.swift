@@ -159,7 +159,7 @@ final class CaffeinateManager: ObservableObject {
         }
     }
 
-    private static func formatRemaining(seconds: Int) -> String {
+    nonisolated static func formatRemaining(seconds: Int) -> String {
         if seconds < 60 {
             return "\(seconds)s"
         }

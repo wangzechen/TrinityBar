@@ -151,6 +151,7 @@ TrinityBar/
             ├── BatteryDetailsPageView.swift # Sankey power flow + battery telemetry + high energy apps
             ├── NetworkDetailsPageView.swift # Wi-Fi scanner + expandable link telemetry
             └── SoundDetailsPageView.swift   # CoreAudio Output/Input switcher + audio stream telemetry
+└── Tests/TrinityBarTests/                   # XCTest unit tests for pure logic (`swift test`)
 ```
 
 ---
