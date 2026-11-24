@@ -175,7 +175,7 @@ struct SoundInfoBarSection: View {
                 SummaryGlassMetricCard(
                     symbol: audio.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
                     value: audio.volumeLevelText,
-                    label: audio.isMuted ? "Tap Unmute" : "Volume",
+                    label: audio.isMuted ? "Unmute" : "Volume",
                     tint: audio.isMuted ? .red : .primary,
                     isSilver: !audio.isMuted
                 )

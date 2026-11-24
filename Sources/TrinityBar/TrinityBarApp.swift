@@ -252,7 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Tooltip and help always follow the setting; the scroll monitors themselves are attached only while
-    /// Icon Volume Control is on **and** the pointer is over the emblem, so scrolling elsewhere never wakes TrinityBar.
+    /// Scroll Icon for Volume is on **and** the pointer is over the emblem, so scrolling elsewhere never wakes TrinityBar.
     private func syncStatusBarScrollMonitors() {
         let enabled = settings.iconVolumeControl
         if enabled {
@@ -391,7 +391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        // Attach or tear down status bar scroll monitors when Icon Volume Control is toggled
+        // Attach or tear down status bar scroll monitors when Scroll Icon for Volume is toggled
         settings.$iconVolumeControl
             .removeDuplicates()
             .dropFirst()

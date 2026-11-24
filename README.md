@@ -8,7 +8,7 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-**TrinityBar** is a lightweight (`~712 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and live `Reduce Transparency` fallbacks).
+**TrinityBar** is a lightweight (`~732 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and live `Reduce Transparency` fallbacks).
 
 <p align="center">
   <img src="assets/dashboard-summary.png" width="382" valign="top" alt="TrinityBar Summary Dashboard" />
@@ -31,7 +31,7 @@
 - **Bottom Volume Footer**: Switchable inside **Settings** between:
   - **`Dots`** *(default)* — 4 curved volume steps
   - **`Arc`** — continuous bottom volume sweep
-  - **`None`** — hides the bottom volume bar and **automatically shows the native macOS Sound icon** in the status bar
+  - **`None`** — hides the bottom volume bar and **automatically shows the native macOS Sound icon** in the status bar (Settings notes this; scrolling the emblem still flashes the dots for a moment as feedback)
 - **Split-Layer Menu Bar Compositing**: Pairs an `isTemplate = true` vibrancy base with a non-template chromatic status overlay so monochrome strokes adapt natively to light/dark wallpapers while semantic battery colors remain vivid
 
 ### 2. Liquid Glass Summary & Drill-Down Pages
@@ -39,15 +39,15 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
 
 | Module | Summary Sub-Cards | Second-Layer Drill-Down Page |
 | :--- | :--- | :--- |
-| **Battery** | `Adapter` · `Charging / Discharging` · `System` (live Watts; AC-only cards on desktop Macs) | Cubic-Bezier **Sankey Power Flow** diagram (`Adapter/Battery -> Charging, System, Display, USB`), background SMC electrical & thermal sensors, live **High Energy Apps** (user apps via `proc_pid_rusage`), `Battery Settings…` link |
-| **Network** | `Signal / Band` · `Latency` (`ms`) · `↓ / ↑ Throughput` (64-bit counters) | Quick Wi-Fi Power switch, live **Known / Other Networks** scanner with one-click **Known Wi-Fi** direct connect, Location Services prompt for SSID access, expandable **Connection Details** (`SSID`, `BSSID`, `Channel`, `SNR`, `PHY`, `Tx Rate`, `IPv4/v6`, `Router`, `DNS` — click any value to copy) |
-| **Sound** | Tap-to-Mute `Volume %` card · Interactive **Capsule Volume Slider** (fixed-volume outputs such as HDMI or Multi-Output devices show `—` with a dimmed, inert slider and an empty emblem footer) | Instant **Output & Input** `CoreAudio` device switcher (MacBook Speakers, Bluetooth Headsets/AirPods, USB DACs, HDMI/AirPlay — automatically excludes internal virtual loopback drivers), expandable **Audio Details** |
+| **Battery** | `Adapter` · `Charging / Discharging` · `System` (live Watts; AC-only cards on desktop Macs) | Cubic-Bezier **Sankey Power Flow** diagram (`Adapter/Battery -> Charging, System, Display, USB`), background SMC electrical & thermal sensors, live **High Energy Apps** (user apps via `proc_pid_rusage`, sampled only while this page is open), charge status when plugged in but not charging (`Fully charged` / `Paused (Optimized Charging)` / `Not charging`), `Battery Settings…` link |
+| **Network** | `Signal / Band` · `Latency` (`ms`) · `↓ / ↑ Throughput` (64-bit counters) | Quick Wi-Fi Power switch, live **Known / Other Networks** scanner with one-click **Known Wi-Fi** direct connect (a failed join says so inline; click again for Wi-Fi Settings), Location Services prompt for SSID access, expandable **Connection Details** (`SSID`, `BSSID`, `Channel`, `SNR`, `PHY`, `Tx Rate`, `IPv4/v6`, `Router`, `DNS` — click any value to copy) |
+| **Sound** | Click-to-Mute `Volume %` card · Interactive **Capsule Volume Slider** (fixed-volume outputs such as HDMI or Multi-Output devices show `—` with a dimmed, inert slider and an empty emblem footer) | Instant **Output & Input** `CoreAudio` device switcher (MacBook Speakers, Bluetooth Headsets/AirPods, USB DACs, HDMI/AirPlay — automatically excludes internal virtual loopback drivers), expandable **Audio Details** |
 
 ### 3. Native Control Center Auto-Hide & Collapsible Settings
 - **Hide Native Icons** *(enabled by default, persisted across restarts)*: Snapshots your existing macOS Control Center `WiFi`, `Battery`, and `Sound` menu bar visibility states before hiding them, and restores your exact pre-TrinityBar layout when toggled off or when TrinityBar exits (`Quit`, `⌘Q`, `SIGTERM`, `SIGINT`).
 - **Safe on New macOS Versions**: Control Center's visibility settings are undocumented, so on a macOS major version TrinityBar hasn't been verified on, `Hide Native Icons` starts off and the Settings drawer explains why; turning it on opts in for that version.
 - **Crash Recovery & Single Instance**: If TrinityBar is force-quit while icons are hidden, `TrinityBar --restore-native-icons` (or relaunching and quitting) brings them back. Launching a second copy exits quietly instead of fighting over the menu bar.
-- **Collapsible Settings Drawer**: Houses `Volume Bar` (`Dots / Arc / None`) with a live emblem preview, `Top % Number`, `Icon Volume Control` (scroll-to-volume & `⌥`-Click mute on the menu bar icon), `Hide Native Icons`, `Launch at Login` (`SMAppService.mainApp`), timed `Keep Awake` (`30m / 1h / 2h / ∞` via `IOPMAssertion`, with a clock-style `29:59` / `1:29:59` countdown badge that ticks every second while the dashboard is open), and `Quit TrinityBar`, animated smoothly with zero frame-0 jump.
+- **Collapsible Settings Drawer**: Houses `Volume Bar` (`Dots / Arc / None`) with a live emblem preview, `Battery % on Icon`, `Scroll Icon for Volume` (scroll-to-volume & `⌥`-Click mute on the menu bar icon), `Hide Native Icons`, `Launch at Login` (`SMAppService.mainApp`), timed `Keep Awake` (`30m / 1h / 2h / ∞` via `IOPMAssertion`, with a clock-style `29:59` / `1:29:59` countdown badge that ticks every second while the dashboard is open), and `Quit TrinityBar`, animated smoothly with zero frame-0 jump.
 
 ---
 
@@ -56,8 +56,8 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
 | Action | Behavior |
 | :--- | :--- |
 | **Left-click** menu bar emblem | Toggle the Liquid Glass dashboard |
-| **Scroll** on menu bar emblem | Smoothly adjust system output volume *(when `Icon Volume Control` is enabled)* |
-| **`⌥`-click** (Option-click) emblem | Toggle system output mute *(when `Icon Volume Control` is enabled)* |
+| **Scroll** on menu bar emblem | Smoothly adjust system output volume *(when `Scroll Icon for Volume` is enabled; TrinityBar only listens for scrolls while the pointer is over the emblem)* |
+| **`⌥`-click** (Option-click) emblem | Toggle system output mute *(when `Scroll Icon for Volume` is enabled)* |
 | **Right-click** (`⌃`-click) emblem | Show minimal `Quit TrinityBar (⌘Q)` menu |
 | **Two-finger scroll** on Summary / Sound | Smoothly adjust system output volume |
 | **Click** any copyable telemetry value | Copy `IPv4`, `IPv6`, `Router`, `DNS`, `SSID`, `BSSID`, etc. with `"Copied"` feedback |
@@ -169,13 +169,14 @@ TrinityBar/
     ├── BatteryAlertLevelTests.swift         # Charging / critical / low / normal thresholds
     ├── CaffeinateFormatTests.swift          # Keep Awake M:SS / H:MM:SS countdown formatting
     ├── LaunchOptionsTests.swift             # Launch flag parsing & single-instance detection
-    ├── PowerSourceSelectionTests.swift      # Internal battery chosen over UPS / external sources
+    ├── PowerSourceSelectionTests.swift      # Internal battery over UPS, charge-hold reason, temperature
     ├── RoutablePublicIPTests.swift          # Latency-probe public vs private / CGNAT / ULA address filter
+    ├── SMCDecodingTests.swift               # AppleSMC flt / fpe2 / sp78 / ui16 / si16 decoding via a fake exchange
     ├── StatusFloatingPanelTests.swift       # Scroll-to-volume scaling & panel placement geometry
     ├── SystemIconsManagerTests.swift        # Native icon hide / snapshot / restore policy against fake prefs
     ├── TrinityStatusIconRendererTests.swift # Menu bar layers for every mode × connection × charging state
-    ├── VolumeDisplayTests.swift             # Volume dots / arc / % text, muted and fixed-volume outputs
-    └── WiFiSignalTests.swift                # RSSI -> bars and SF Symbol variable value
+    ├── VolumeDisplayTests.swift             # Volume dots / arc / % text, fixed-volume outputs, None scroll flash
+    └── WiFiSignalTests.swift                # RSSI -> bars, SF Symbol value, background signal timer gating
 ```
 
 ---
@@ -185,6 +186,7 @@ TrinityBar/
 - **Zero Telemetry & Zero Third-Party Dependencies**: Built exclusively against public macOS system frameworks (`AppKit`, `SwiftUI`, `IOKit`, `CoreWLAN`, `CoreAudio`, `Network`, `ServiceManagement`). No analytics, crash reporters, or external SDKs.
 - **Location Services *(Optional)***: Requested only if you click **Allow Location Access** on the Wi-Fi page. macOS redacts Wi-Fi `SSID` and `BSSID` strings unless Location permission is granted; TrinityBar never reads or stores geographic coordinates.
 - **Latency Probe *(Popover-Only)***: While the dashboard is open, network RTT is measured via a lightweight TCP handshake to your Mac's own configured public DNS server (falling back to Apple's global `captive.apple.com` connectivity endpoint when your DNS is a local LAN router). Zero probes run while the panel is closed.
+- **Copied Values Stay on This Mac**: Values copied from the dashboard (IP, BSSID, router, DNS) are written with `currentHostOnly`, so they don't sync to your other devices through Universal Clipboard.
 
 ---
 

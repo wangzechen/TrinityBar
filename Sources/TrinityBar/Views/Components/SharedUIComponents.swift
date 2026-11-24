@@ -155,6 +155,7 @@ struct SummaryModuleHeaderRow<Accessory: View>: View {
             }
             .buttonStyle(.plain)
             .help(detailsHelp)
+            .accessibilityLabel(detailsHelp)
 
             Button(action: onOpenSettings) {
                 Image(systemName: "gearshape")
@@ -164,6 +165,7 @@ struct SummaryModuleHeaderRow<Accessory: View>: View {
             }
             .buttonStyle(.plain)
             .help(settingsHelp)
+            .accessibilityLabel(settingsHelp)
         }
     }
 }
@@ -217,6 +219,8 @@ struct NavigationBackHeader: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Back")
+        .accessibilityHint("Returns to the summary from \(title)")
     }
 }
 
@@ -269,6 +273,8 @@ struct CollapsibleSectionHeader<Badge: View>: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
     }
 }
 

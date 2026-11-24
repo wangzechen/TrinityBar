@@ -23,6 +23,7 @@ struct SoundDetailsPageView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Refresh Audio Devices")
+                .accessibilityLabel("Refresh Audio Devices")
             }
 
             // Live Mute + Capsule Volume Slider for whichever device is currently active
@@ -159,5 +160,6 @@ struct SoundDetailsPageView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(item.isSelected ? .isSelected : [])
     }
 }

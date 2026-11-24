@@ -131,7 +131,8 @@ final class AppSettings: ObservableObject {
     /// Writes `value` to the macOS pasteboard and flashes a temporary "Copied" confirmation on `key`.
     func copyToClipboard(_ value: String, key: String) {
         guard !value.isEmpty, value != "—" else { return }
-        NSPasteboard.general.clearContents()
+        // Network details (IP, BSSID, router) stay on this Mac instead of syncing via Universal Clipboard.
+        NSPasteboard.general.prepareForNewContents(with: .currentHostOnly)
         NSPasteboard.general.setString(value, forType: .string)
 
         copyResetTask?.cancel()

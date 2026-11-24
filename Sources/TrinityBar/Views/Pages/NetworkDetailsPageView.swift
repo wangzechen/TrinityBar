@@ -35,6 +35,7 @@ struct NetworkDetailsPageView: View {
                     .buttonStyle(.plain)
                     .disabled(network.isScanningWiFi || !network.wifiPowerOn)
                     .help("Rescan Wi-Fi Networks")
+                    .accessibilityLabel("Rescan Wi-Fi Networks")
                 }
             }
 
@@ -43,7 +44,7 @@ struct NetworkDetailsPageView: View {
                     Text("Wi-Fi Power")
                         .font(.system(size: 12, weight: .medium))
                     Spacer()
-                    Toggle("", isOn: Binding(
+                    Toggle("Wi-Fi Power", isOn: Binding(
                         get: { network.wifiPowerOn },
                         set: { network.setWiFiPower($0) }
                     ))
@@ -149,14 +150,13 @@ struct NetworkDetailsPageView: View {
 
     private func scannedNetworkRow(_ item: ScannedWiFiItem) -> some View {
         let isConnecting = (network.connectingSSID == item.ssid)
+        let joinFailed = (network.joinFailedSSID == item.ssid)
         return Button {
             guard !item.isConnected, network.connectingSSID == nil else { return }
-            if item.isKnown {
+            if item.isKnown && !joinFailed {
+                // A failed join stays on this page with an inline note; a second click opens Wi-Fi Settings.
                 Task { @MainActor in
-                    let ok = await network.connectToKnownNetwork(ssid: item.ssid)
-                    if !ok, network.wifiPowerOn, settings.route == .network {
-                        onOpenNetworkSettings()
-                    }
+                    _ = await network.connectToKnownNetwork(ssid: item.ssid)
                 }
             } else {
                 onOpenNetworkSettings()
@@ -179,10 +179,18 @@ struct NetworkDetailsPageView: View {
                         .frame(width: 14)
                 }
 
-                Text(item.ssid)
-                    .font(.system(size: 12, weight: item.isConnected ? .semibold : .regular))
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(item.ssid)
+                        .font(.system(size: 12, weight: item.isConnected ? .semibold : .regular))
+                        .lineLimit(1)
+                    if joinFailed {
+                        Text("Couldn't join. Click to open Wi-Fi Settings.")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 if let r = item.rssi {
                     Text("\(r) dBm")
@@ -201,6 +209,8 @@ struct NetworkDetailsPageView: View {
         }
         .buttonStyle(.plain)
         .disabled(network.connectingSSID != nil)
+        .help(item.isConnected ? "Connected" : ((item.isKnown && !joinFailed) ? "Join \(item.ssid)" : "Open Wi-Fi Settings to join"))
+        .accessibilityAddTraits(item.isConnected ? .isSelected : [])
     }
 
     private var connectionDetailRows: some View {

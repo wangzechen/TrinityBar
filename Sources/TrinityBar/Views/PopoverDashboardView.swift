@@ -246,6 +246,7 @@ private struct NetworkSummarySection: View {
                     }
                     .buttonStyle(.plain)
                     .help(network.wifiPowerOn ? "Turn Wi-Fi Off" : "Turn Wi-Fi On")
+                    .accessibilityLabel(network.wifiPowerOn ? "Turn Wi-Fi Off" : "Turn Wi-Fi On")
                 }
             }
 
@@ -424,7 +425,7 @@ private struct SettingsDrawerSection<Preview: View>: View {
 
                 Spacer(minLength: 4)
 
-                Picker("", selection: $settings.bottomMode) {
+                Picker("Volume Bar", selection: $settings.bottomMode) {
                     ForEach(BottomIndicatorMode.allCases) { mode in
                         Text(mode.label).tag(mode)
                     }
@@ -435,12 +436,20 @@ private struct SettingsDrawerSection<Preview: View>: View {
                 .frame(width: 164)
             }
 
-            toggleRow("Top % Number", isOn: $settings.showTopPercentage)
+            if settings.bottomMode == .none {
+                drawerNote("The native Sound icon is shown in the menu bar instead.")
+            }
 
             toggleRow(
-                "Icon Volume Control",
+                "Battery % on Icon",
+                isOn: $settings.showTopPercentage,
+                help: "Show the battery percentage at the top of the menu bar icon"
+            )
+
+            toggleRow(
+                "Scroll Icon for Volume",
                 isOn: $settings.iconVolumeControl,
-                help: "Scroll on the menu bar icon to adjust volume, and ⌥-Click to mute"
+                help: "Scroll on the menu bar icon to adjust volume, and ⌥-Click it to mute"
             )
 
             toggleRow(
@@ -450,10 +459,7 @@ private struct SettingsDrawerSection<Preview: View>: View {
             )
 
             if !systemIcons.isVerifiedOnThisMacOS {
-                Text("Not yet verified on macOS \(systemIcons.macOSMajorVersion), so it starts off. Turn it on to try it.")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                drawerNote("Off by default: not yet tested on macOS \(systemIcons.macOSMajorVersion). Turn it on to try it.")
             }
 
             HStack(spacing: 6) {
@@ -472,7 +478,7 @@ private struct SettingsDrawerSection<Preview: View>: View {
                     .help("Allow TrinityBar in System Settings → General → Login Items")
                 }
                 Spacer()
-                Toggle("", isOn: Binding(
+                Toggle("Launch at Login", isOn: Binding(
                     get: { settings.launchAtLogin },
                     set: { settings.setLaunchAtLogin($0) }
                 ))
@@ -564,12 +570,20 @@ private struct SettingsDrawerSection<Preview: View>: View {
             Text(title)
                 .font(.system(size: 11.5))
             Spacer()
-            Toggle("", isOn: isOn)
+            Toggle(title, isOn: isOn)
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .labelsHidden()
                 .help(help ?? "")
         }
+    }
+
+    private func drawerNote(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9.5))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, -4)
     }
 
     private var keepAwakeButtonTitle: String {

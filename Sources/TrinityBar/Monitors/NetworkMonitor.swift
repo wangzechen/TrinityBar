@@ -104,6 +104,8 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
     @Published private(set) var otherNetworks: [ScannedWiFiItem] = []
     @Published private(set) var isScanningWiFi: Bool = false
     @Published private(set) var connectingSSID: String?
+    /// Known network whose last one-click join failed (cleared on the next attempt or when the panel closes).
+    @Published private(set) var joinFailedSSID: String?
     @Published private(set) var needsLocationPermission: Bool = false
 
     /// 0...3 bars for center Wi-Fi symbol
@@ -346,6 +348,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
     func connectToKnownNetwork(ssid targetSSID: String) async -> Bool {
         guard connectingSSID == nil, wifiPowerOn else { return false }
         connectingSSID = targetSSID
+        joinFailedSSID = nil
 
         let associated: Bool = await withCheckedContinuation { continuation in
             wlanWorkerQueue.async { [weak self] in
@@ -380,6 +383,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
             return true
         } else {
             connectingSSID = nil
+            joinFailedSSID = targetSSID
             return false
         }
     }
@@ -415,6 +419,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         syncBackgroundSignalTimer()
 
         guard visible else {
+            joinFailedSSID = nil
             cancelActivePing()
             return
         }

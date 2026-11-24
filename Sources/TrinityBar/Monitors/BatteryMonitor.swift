@@ -553,7 +553,7 @@ final class BatteryMonitor: ObservableObject {
         return (type, size, resp)
     }
 
-    nonisolated private static func readSMCScalar(key: UInt32, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
+    nonisolated static func readSMCScalar(key: UInt32, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
         guard let raw = readSMCRaw(key: key, exchange: exchange) else { return nil }
         let val: Double
         switch (raw.type, raw.size) {
@@ -571,7 +571,7 @@ final class BatteryMonitor: ObservableObject {
         return val.isFinite ? val : nil
     }
 
-    nonisolated private static func readSMCIntegerSensor(key: UInt32, signed: Bool, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
+    nonisolated static func readSMCIntegerSensor(key: UInt32, signed: Bool, exchange: ([UInt8]) -> [UInt8]?) -> Double? {
         guard let raw = readSMCRaw(key: key, exchange: exchange),
               raw.size == 2,
               (raw.type == 0x73693136 || raw.type == 0x75693136) else {
