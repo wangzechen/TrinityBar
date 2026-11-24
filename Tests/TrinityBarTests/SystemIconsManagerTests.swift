@@ -163,6 +163,41 @@ final class SystemIconsManagerTests: XCTestCase {
         assertUserLayoutRestored()
     }
 
+    // MARK: - --restore-native-icons
+
+    func testRestoreCommandAfterCrashWhileHiddenRestoresUserLayout() {
+        let crashed = makeManager()
+        crashed.applyOnLaunchIfNeeded()
+        let restartsBefore = restarts.count
+
+        // `--restore-native-icons` builds a fresh manager without applying the launch policy.
+        let restorer = makeManager()
+        XCTAssertTrue(restorer.restoreNativeIconsIfNeeded())
+
+        assertUserLayoutRestored()
+        XCTAssertFalse(defaults.bool(forKey: "TrinityBar.systemIconsCurrentlyHidden"))
+        XCTAssertEqual(restarts.count, restartsBefore + 1)
+        // Running it again finds nothing left to do.
+        XCTAssertFalse(makeManager().restoreNativeIconsIfNeeded())
+    }
+
+    func testRestoreCommandAfterCrashWhileSoundForcedGivesBackUserSetting() {
+        let crashed = makeManager(autoHide: false)
+        crashed.setIncludesVolumeInEmblem(false)
+        assertForcedVisible("Sound")
+
+        XCTAssertTrue(makeManager().restoreNativeIconsIfNeeded())
+
+        assertUserLayoutRestored()
+    }
+
+    func testRestoreCommandWithNothingHiddenDoesNothing() {
+        XCTAssertFalse(makeManager().restoreNativeIconsIfNeeded())
+
+        assertUserLayoutRestored()
+        XCTAssertEqual(restarts.count, 0)
+    }
+
     func testReapplyingUnchangedPolicyDoesNotRestartControlCenter() {
         let manager = makeManager()
         manager.applyOnLaunchIfNeeded()

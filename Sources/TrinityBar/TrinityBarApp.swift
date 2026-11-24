@@ -469,6 +469,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct TrinityBarMain {
     @MainActor
     static func main() {
+        let mode = LaunchMode(arguments: CommandLine.arguments)
+        let otherInstanceRunning = Bundle.main.bundleIdentifier.map { bundleID in
+            SingleInstance.anotherInstanceIsRunning(
+                currentPID: ProcessInfo.processInfo.processIdentifier,
+                runningPIDs: NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+                    .map(\.processIdentifier)
+            )
+        } ?? false
+
+        switch mode {
+        case .restoreNativeIcons:
+            if otherInstanceRunning {
+                // The running instance owns the icons and restores them itself when it quits.
+                FileHandle.standardError.write(Data("TrinityBar is running; quit it first (it restores the native icons on quit).\n".utf8))
+                exit(1)
+            }
+            let restored = SystemIconsManager().restoreNativeIconsIfNeeded()
+            print(restored ? "Restored the native Wi-Fi, Battery and Sound menu bar icons." : "Nothing to restore: TrinityBar isn't hiding any native icons.")
+            exit(0)
+        case .app:
+            if otherInstanceRunning {
+                // Exit before AppDelegate exists: going through NSApp.terminate would run applicationWillTerminate
+                // and restore the icons the running instance is hiding.
+                exit(0)
+            }
+        }
+
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate

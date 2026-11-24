@@ -148,13 +148,26 @@ final class SystemIconsManager: ObservableObject {
     }
 
     func restoreOnTerminateIfNeeded() {
+        restoreNativeIconsIfNeeded()
+    }
+
+    /// Hands every native icon TrinityBar hid or force-showed back to the user's own setting. Also used by
+    /// `--restore-native-icons` after a crash or `SIGKILL`. Returns `true` when it had anything to restore.
+    @discardableResult
+    func restoreNativeIconsIfNeeded() -> Bool {
+        var hadState = false
         if isCurrentlyHiddenByApp {
+            hadState = true
             restoreSystemIcons()
         }
-        if releaseForcedSoundIfNeeded() {
-            syncPreferences()
-            restartControlCenter()
+        if isSoundForcedVisible {
+            hadState = true
+            if releaseForcedSoundIfNeeded() {
+                syncPreferences()
+                restartControlCenter()
+            }
         }
+        return hadState
     }
 
     /// Applies the desired visibility for `WiFi`, `Battery`, and `Sound` based on `(autoHideEnabled, includesVolumeInEmblem)`.

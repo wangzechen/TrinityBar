@@ -99,10 +99,13 @@ Quitting TrinityBar normally (`Quit TrinityBar`, `⌘Q`, or `SIGTERM`) automatic
 - **Remove the app & saved preferences**:
   ```zsh
   killall TrinityBar 2>/dev/null || true
+  /Applications/TrinityBar.app/Contents/MacOS/TrinityBar --restore-native-icons
   rm -rf /Applications/TrinityBar.app
   defaults delete com.zechen.trinitybar
   ```
-- **Manual native icon recovery** *(only needed if TrinityBar was force-killed with `SIGKILL` / `kill -9`)*:
+  The `--restore-native-icons` step hands the native icons back to your own pre-TrinityBar settings even if TrinityBar previously crashed or was force-killed, so run it **before** `defaults delete`, which removes the saved snapshot. It does nothing if no icons are hidden.
+- **Native icon recovery after a crash or `kill -9`** *(app still installed)*: run `/Applications/TrinityBar.app/Contents/MacOS/TrinityBar --restore-native-icons`, or simply launch TrinityBar again and quit it.
+- **Last-resort manual recovery** *(snapshot already deleted; resets all three icons to "Show in Menu Bar")*:
   ```zsh
   for key in WiFi Battery Sound; do
     defaults -currentHost write com.apple.controlcenter "$key" -int 18
@@ -141,6 +144,7 @@ TrinityBar/
     │   └── AppIcon.icns                     # Minimalist 1024x1024 macOS squircle app icon (66 KB)
     ├── Models/
     │   ├── AppSettings.swift                # UserDefaults preferences, PanelRoute & clipboard state
+    │   ├── LaunchOptions.swift              # --restore-native-icons mode & single-instance guard
     │   └── ScreenshotMode.swift             # TRINITYBAR_SCREENSHOT demo scenes for README screenshots
     ├── Monitors/
     │   ├── BatteryMonitor.swift             # IOPSCopyPowerSourcesInfo + AppleSmartBattery + background AppleSMC
@@ -162,6 +166,7 @@ TrinityBar/
 └── Tests/TrinityBarTests/                   # XCTest unit tests for pure logic (`swift test`)
     ├── BatteryAlertLevelTests.swift         # Charging / critical / low / normal thresholds
     ├── CaffeinateFormatTests.swift          # Keep Awake M:SS / H:MM:SS countdown formatting
+    ├── LaunchOptionsTests.swift             # Launch flag parsing & single-instance detection
     ├── RoutablePublicIPTests.swift          # Latency-probe public vs private / CGNAT / ULA address filter
     ├── StatusFloatingPanelTests.swift       # Scroll-to-volume scaling & panel placement geometry
     ├── SystemIconsManagerTests.swift        # Native icon hide / snapshot / restore policy against fake prefs
