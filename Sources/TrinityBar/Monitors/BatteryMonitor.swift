@@ -195,6 +195,15 @@ final class BatteryMonitor: ObservableObject {
         }
     }
 
+    /// Returns the built-in battery's IOPS description, ignoring UPS units and other external power sources
+    /// and batteries reported as not present.
+    nonisolated static func selectInternalBattery(_ descriptions: [[String: Any]]) -> [String: Any]? {
+        descriptions.first { desc in
+            desc[kIOPSTypeKey as String] as? String == kIOPSInternalBatteryType as String
+                && (desc[kIOPSIsPresentKey as String] as? Bool ?? true)
+        }
+    }
+
     func refresh(includeDetailedSensors: Bool = false) {
         setIfChanged(\.isLowPowerMode, to: ProcessInfo.processInfo.isLowPowerModeEnabled)
 
@@ -205,10 +214,13 @@ final class BatteryMonitor: ObservableObject {
             setIfChanged(\.adapterRatedWatts, to: nil)
         }
 
+        // A UPS (or other external source) can be listed before, or instead of, the built-in battery,
+        // so pick the internal battery explicitly; with none, this is a desktop Mac on AC.
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let list = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef],
-              let first = list.first,
-              let desc = IOPSGetPowerSourceDescription(snapshot, first)?.takeUnretainedValue() as? [String: Any]
+              let desc = Self.selectInternalBattery(
+                list.compactMap { IOPSGetPowerSourceDescription(snapshot, $0)?.takeUnretainedValue() as? [String: Any] }
+              )
         else {
             setIfChanged(\.hasBattery, to: false)
             setIfChanged(\.percentage, to: 100)

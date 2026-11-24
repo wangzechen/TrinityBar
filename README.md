@@ -167,6 +167,7 @@ TrinityBar/
     ├── BatteryAlertLevelTests.swift         # Charging / critical / low / normal thresholds
     ├── CaffeinateFormatTests.swift          # Keep Awake M:SS / H:MM:SS countdown formatting
     ├── LaunchOptionsTests.swift             # Launch flag parsing & single-instance detection
+    ├── PowerSourceSelectionTests.swift      # Internal battery chosen over UPS / external sources
     ├── RoutablePublicIPTests.swift          # Latency-probe public vs private / CGNAT / ULA address filter
     ├── StatusFloatingPanelTests.swift       # Scroll-to-volume scaling & panel placement geometry
     ├── SystemIconsManagerTests.swift        # Native icon hide / snapshot / restore policy against fake prefs
