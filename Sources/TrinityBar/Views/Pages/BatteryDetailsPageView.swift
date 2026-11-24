@@ -30,7 +30,7 @@ struct BatteryDetailsPageView: View {
                 if battery.hasBattery {
                     DetailKeyValueRow(
                         keyID: "bat.time",
-                        label: battery.isCharging ? "Time to Full" : "Time Remaining",
+                        label: battery.isCharging ? "Time to Full" : (battery.chargeHold != nil ? "Charging" : "Time Remaining"),
                         value: timeEstimateValue,
                         settings: settings
                     )
@@ -127,11 +127,11 @@ struct BatteryDetailsPageView: View {
     }
 
     private var timeEstimateValue: String {
+        if let hold = battery.chargeHold {
+            return hold.shortText
+        }
         if let mins = battery.timeRemainingMinutes {
             return DisplayFormat.hoursMinutes(mins)
-        }
-        if battery.isPluggedIn && !battery.isCharging && battery.percentage >= 98 {
-            return "Fully Charged"
         }
         return "Calculating…"
     }

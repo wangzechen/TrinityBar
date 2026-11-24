@@ -21,4 +21,12 @@ final class WiFiSignalTests: XCTestCase {
         XCTAssertEqual(WiFiSignal.variableValue(bars: 4), 1.0)
         XCTAssertEqual(WiFiSignal.variableValue(bars: -1), 0.0)
     }
+
+    func testBackgroundSignalTimerOnlyOnWiFiWithPanelClosed() {
+        XCTAssertTrue(NetworkMonitor.needsBackgroundSignalTimer(kind: .wifi, isPopoverVisible: false))
+        XCTAssertFalse(NetworkMonitor.needsBackgroundSignalTimer(kind: .wifi, isPopoverVisible: true))
+        XCTAssertFalse(NetworkMonitor.needsBackgroundSignalTimer(kind: .ethernet, isPopoverVisible: false))
+        XCTAssertFalse(NetworkMonitor.needsBackgroundSignalTimer(kind: .offline, isPopoverVisible: false))
+        XCTAssertFalse(NetworkMonitor.needsBackgroundSignalTimer(kind: .other, isPopoverVisible: false))
+    }
 }

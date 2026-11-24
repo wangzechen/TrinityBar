@@ -128,6 +128,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
     nonisolated(unsafe) private var scannedCWNets: [String: CWNetwork] = [:]
     private var prevBytes: (rx: UInt64, tx: UInt64, time: TimeInterval)?
     private var liveSampleTick: Int = 0
+    private var isPopoverVisible = false
     private var isRefreshingLink = false
     private var linkRefreshPending = false
     /// Optimistic Wi-Fi power state while `setPower` is in flight; link snapshots must not overwrite it.
@@ -140,14 +141,50 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         locationManager.delegate = self
         startPathMonitor()
         refreshStaticTelemetry()
+    }
 
-        let bgTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.refreshWifiAndIP()
+    /// Background cadence for the emblem's Wi-Fi bars while the panel is closed.
+    nonisolated static let backgroundSignalInterval: TimeInterval = 20
+
+    /// Whether the closed-panel signal timer should exist: only on Wi-Fi (Ethernet / offline bars don't depend on
+    /// RSSI) and only while the panel is closed (the panel runs its own live sampler).
+    nonisolated static func needsBackgroundSignalTimer(kind: ConnectionKind, isPopoverVisible: Bool) -> Bool {
+        kind == .wifi && !isPopoverVisible
+    }
+
+    /// The panel-closed path reads only power + RSSI (2 `airportd` round-trips) every `20 s`. SSID, IP, router and
+    /// DNS changes arrive with `NWPathMonitor` updates, which trigger a full `refreshWifiAndIP()`.
+    private func syncBackgroundSignalTimer() {
+        let needed = Self.needsBackgroundSignalTimer(kind: kind, isPopoverVisible: isPopoverVisible)
+        if needed, signalRefreshTimer == nil {
+            let timer = Timer.scheduledTimer(withTimeInterval: Self.backgroundSignalInterval, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.refreshSignalOnly()
+                }
+            }
+            timer.tolerance = 5.0
+            signalRefreshTimer = timer
+        } else if !needed, let timer = signalRefreshTimer {
+            timer.invalidate()
+            signalRefreshTimer = nil
+        }
+    }
+
+    private func refreshSignalOnly() {
+        guard !isRefreshingLink else { return }
+        let powerSeq = wifiPowerSeq
+        linkQueue.async { [weak self] in
+            guard let iface = CWWiFiClient.shared().interface() else { return }
+            let powerOn = iface.powerOn()
+            let r = powerOn ? iface.rssiValue() : 0
+            Task { @MainActor [weak self] in
+                guard let self, !self.isRefreshingLink else { return }
+                if self.pendingWiFiPower == nil, powerSeq == self.wifiPowerSeq {
+                    self.setIfChanged(\.wifiPowerOn, to: powerOn)
+                }
+                self.setIfChanged(\.rssi, to: r < 0 ? r : nil)
             }
         }
-        bgTimer.tolerance = 2.0
-        signalRefreshTimer = bgTimer
     }
 
     deinit {
@@ -363,6 +400,7 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.setIfChanged(\.kind, to: detectedKind)
+                self.syncBackgroundSignalTimer()
                 self.refreshStaticTelemetry()
             }
         }
@@ -373,6 +411,8 @@ final class NetworkMonitor: NSObject, ObservableObject, @preconcurrency CLLocati
         liveSamplerTimer?.invalidate()
         liveSamplerTimer = nil
         prevBytes = nil
+        isPopoverVisible = visible
+        syncBackgroundSignalTimer()
 
         guard visible else {
             cancelActivePing()

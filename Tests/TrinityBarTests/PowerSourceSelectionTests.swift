@@ -48,4 +48,42 @@ final class PowerSourceSelectionTests: XCTestCase {
     func testUntypedSourceIsIgnored() {
         XCTAssertNil(BatteryMonitor.selectInternalBattery([[nameKey: "Mystery", kIOPSCurrentCapacityKey as String: 50]]))
     }
+
+    // MARK: - Charge hold reason
+
+    private func acDesc(charging: Bool, extra: [String: Any] = [:]) -> [String: Any] {
+        var d: [String: Any] = [
+            kIOPSPowerSourceStateKey as String: kIOPSACPowerValue as String,
+            kIOPSIsChargingKey as String: charging,
+        ]
+        d.merge(extra) { $1 }
+        return d
+    }
+
+    func testNoHoldWhileChargingOrOnBattery() {
+        XCTAssertNil(BatteryMonitor.chargeHoldReason(description: acDesc(charging: true)))
+        XCTAssertNil(BatteryMonitor.chargeHoldReason(description: [
+            kIOPSPowerSourceStateKey as String: kIOPSBatteryPowerValue as String,
+            kIOPSIsChargingKey as String: false,
+        ]))
+    }
+
+    func testChargedOptimizedAndGenericHold() {
+        XCTAssertEqual(BatteryMonitor.chargeHoldReason(description: acDesc(charging: false, extra: [kIOPSIsChargedKey as String: true])), .charged)
+        XCTAssertEqual(BatteryMonitor.chargeHoldReason(description: acDesc(charging: false, extra: ["Optimized Battery Charging Engaged": true])), .optimized)
+        XCTAssertEqual(BatteryMonitor.chargeHoldReason(description: acDesc(charging: false)), .onHold)
+    }
+
+    func testOptimizedWinsOverCharged() {
+        let d = acDesc(charging: false, extra: [kIOPSIsChargedKey as String: true, "Optimized Battery Charging Engaged": true])
+        XCTAssertEqual(BatteryMonitor.chargeHoldReason(description: d), .optimized)
+    }
+
+    // MARK: - Battery temperature
+
+    func testTemperatureIsCentiCelsius() {
+        XCTAssertEqual(BatteryMonitor.batteryTemperatureCelsius(raw: 3120)!, 31.2, accuracy: 1e-9)
+        XCTAssertNil(BatteryMonitor.batteryTemperatureCelsius(raw: 0))
+        XCTAssertNil(BatteryMonitor.batteryTemperatureCelsius(raw: 9_000))
+    }
 }

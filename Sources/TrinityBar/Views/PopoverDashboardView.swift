@@ -201,7 +201,7 @@ private struct BatterySummarySection: View {
         } else if battery.isCharging {
             parts.append("Charging")
         } else if battery.isPluggedIn {
-            parts.append("Connected to power")
+            parts.append(battery.chargeHold?.shortText ?? "Connected to power")
         } else {
             parts.append(battery.isLowPowerMode ? "Low Power Mode" : "On battery")
         }

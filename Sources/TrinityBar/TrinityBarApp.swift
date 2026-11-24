@@ -373,6 +373,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        // Scan per-process energy only while the Battery page is on screen
+        settings.$route
+            .removeDuplicates()
+            .sink { [weak self] route in
+                guard let self else { return }
+                self.battery.setEnergyAppsPageVisible(route == .battery && self.panel?.isVisible == true)
+            }
+            .store(in: &cancellables)
+
         // Sync native macOS Sound status bar icon visibility whenever Volume Bar switches to/from None
         settings.$bottomMode
             .removeDuplicates()

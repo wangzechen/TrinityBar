@@ -23,6 +23,24 @@ enum BatteryAlertLevel: Sendable, Equatable {
     }
 }
 
+/// Why a plugged-in battery isn't charging (see `BatteryMonitor.chargeHoldReason(description:)`).
+enum ChargeHoldReason: Equatable, Sendable {
+    /// macOS reports the battery as charged.
+    case charged
+    /// Optimized Battery Charging is holding the charge until it expects you to unplug.
+    case optimized
+    /// Any other pause: a charge limit, temperature, or the normal top-off hysteresis.
+    case onHold
+
+    var shortText: String {
+        switch self {
+        case .charged: return "Fully charged"
+        case .optimized: return "Paused (Optimized Charging)"
+        case .onHold: return "Not charging"
+        }
+    }
+}
+
 struct EnergyAppItem: Identifiable, Equatable {
     let id: String // bundlePath
     let name: String
@@ -46,6 +64,8 @@ final class BatteryMonitor: ObservableObject {
     @Published private(set) var wattage: Double? // signed (+charging, -discharging)
     @Published private(set) var healthPercent: Int?
     @Published private(set) var cycleCount: Int?
+    /// Why the battery isn't charging while on AC; `nil` when charging, on battery, or without a battery.
+    @Published private(set) var chargeHold: ChargeHoldReason?
 
     // Second-layer rich telemetry (AppleSMC + AppleSmartBattery + IOPS Adapter)
     @Published private(set) var adapterRatedWatts: Int?
@@ -77,6 +97,18 @@ final class BatteryMonitor: ObservableObject {
         let energyNj: UInt64
     }
 
+    /// Values parsed from the `AppleSmartBattery` IORegistry entry, read off the main thread.
+    private struct SmartBatterySnapshot: Sendable {
+        var cycleCount: Int?
+        var rawMaxMAh: Int?
+        var designMAh: Int?
+        var directHealthPercent: Int?
+        var permanentFailure = false
+        var rawTemperature: Int?
+        var voltageMV: Int?
+        var instantAmperageMA: Int?
+    }
+
     private struct SMCSensorSnapshot: Sendable {
         let systemLoadWatts: Double?
         let adapterInputWatts: Double?
@@ -94,10 +126,13 @@ final class BatteryMonitor: ObservableObject {
     nonisolated(unsafe) private var smcTask: Task<Void, Never>?
     nonisolated(unsafe) private var energyAppsTask: Task<Void, Never>?
     private var isPopoverVisible: Bool = false
+    /// High Energy Apps is listed only on the Battery page, so the per-process scan runs only while it is shown.
+    private var isEnergyAppsPageVisible: Bool = false
     /// While the popover samples AppleSMC battery voltage/current, those readings own `wattage`, `voltageVolts`
     /// and `amperageMA`; the IORegistry values are skipped so the two sources don't alternate every tick.
     private var smcProvidesBatteryElectrical = false
     private var smcGeneration: UInt64 = 0
+    private var registryGeneration: UInt64 = 0
     private var energySampleGeneration: UInt64 = 0
     private var lastAppSampleTime: TimeInterval?
     private var lastAppCounters: [String: RawAppCounter] = [:]
@@ -127,31 +162,44 @@ final class BatteryMonitor: ObservableObject {
 
         guard visible else {
             smcGeneration &+= 1
-            energySampleGeneration &+= 1
             smcProvidesBatteryElectrical = false
             smcTask?.cancel()
             smcTask = nil
-            energyAppsTask?.cancel()
-            energyAppsTask = nil
-            lastAppSampleTime = nil
-            lastAppCounters.removeAll()
-            highEnergyApps = []
-            isSamplingEnergyApps = false
+            setEnergyAppsPageVisible(false)
             return
         }
 
         refresh(includeDetailedSensors: true)
-        sampleEnergyApps()
 
         let timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.refresh(includeDetailedSensors: true)
-                self.sampleEnergyApps()
+                if self.isEnergyAppsPageVisible {
+                    self.sampleEnergyApps()
+                }
             }
         }
         timer.tolerance = 0.25
         popoverTimer = timer
+    }
+
+    /// Called as the Battery page appears / disappears (and when the panel closes).
+    func setEnergyAppsPageVisible(_ visible: Bool) {
+        let shouldSample = visible && isPopoverVisible
+        guard shouldSample != isEnergyAppsPageVisible else { return }
+        isEnergyAppsPageVisible = shouldSample
+        if shouldSample {
+            sampleEnergyApps()
+        } else {
+            energySampleGeneration &+= 1
+            energyAppsTask?.cancel()
+            energyAppsTask = nil
+            lastAppSampleTime = nil
+            lastAppCounters.removeAll()
+            if !highEnergyApps.isEmpty { highEnergyApps = [] }
+            if isSamplingEnergyApps { isSamplingEnergyApps = false }
+        }
     }
 
     private func setupNotifications() {
@@ -197,6 +245,18 @@ final class BatteryMonitor: ObservableObject {
 
     /// Returns the built-in battery's IOPS description, ignoring UPS units and other external power sources
     /// and batteries reported as not present.
+    /// Plugged in but not charging: tells "full" apart from "held back by macOS" (Optimized Battery Charging) and
+    /// any other hold (a charge limit, temperature, or the normal top-off pause). Uses the documented
+    /// `kIOPSIsChargedKey` and the `Optimized Battery Charging Engaged` key macOS adds to the same dictionary.
+    nonisolated static func chargeHoldReason(description desc: [String: Any]) -> ChargeHoldReason? {
+        let onAC = desc[kIOPSPowerSourceStateKey as String] as? String == kIOPSACPowerValue as String
+        let charging = desc[kIOPSIsChargingKey as String] as? Bool ?? false
+        guard onAC, !charging else { return nil }
+        if desc["Optimized Battery Charging Engaged"] as? Bool == true { return .optimized }
+        if desc[kIOPSIsChargedKey as String] as? Bool == true { return .charged }
+        return .onHold
+    }
+
     nonisolated static func selectInternalBattery(_ descriptions: [[String: Any]]) -> [String: Any]? {
         descriptions.first { desc in
             desc[kIOPSTypeKey as String] as? String == kIOPSInternalBatteryType as String
@@ -235,7 +295,8 @@ final class BatteryMonitor: ObservableObject {
             setIfChanged(\.amperageMA, to: nil)
             setIfChanged(\.designCapacityMAh, to: nil)
             setIfChanged(\.maxCapacityMAh, to: nil)
-            if includeDetailedSensors || popoverTimer != nil {
+            setIfChanged(\.chargeHold, to: nil)
+            if includeDetailedSensors || isPopoverVisible {
                 readSMCSensors()
             }
             return
@@ -250,6 +311,7 @@ final class BatteryMonitor: ObservableObject {
         setIfChanged(\.isPluggedIn, to: powerState == kIOPSACPowerValue as String)
         let charging = (desc[kIOPSIsChargingKey as String] as? Bool) ?? false
         setIfChanged(\.isCharging, to: charging)
+        setIfChanged(\.chargeHold, to: Self.chargeHoldReason(description: desc))
 
         let nextMinutes: Int?
         if charging {
@@ -267,34 +329,60 @@ final class BatteryMonitor: ObservableObject {
         }
         setIfChanged(\.timeRemainingMinutes, to: nextMinutes)
 
-        readSmartBatteryRegistry()
-        if includeDetailedSensors || popoverTimer != nil {
+        // Health, temperature and electrical detail are shown only in the panel, so the IORegistry copy (a large
+        // dictionary) is skipped while it is closed and done off the main thread while it is open.
+        if includeDetailedSensors || isPopoverVisible {
+            readSmartBatteryRegistry()
             readSMCSensors()
         }
     }
 
     private func readSmartBatteryRegistry() {
-        let matching = IOServiceMatching("AppleSmartBattery")
-        let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
-        guard service != IO_OBJECT_NULL else { return }
+        registryGeneration &+= 1
+        let generation = registryGeneration
+        Task { @MainActor [weak self] in
+            let snapshot = await Task.detached(priority: .utility) {
+                Self.readSmartBatterySnapshot()
+            }.value
+            guard let self, self.registryGeneration == generation, self.hasBattery, let snapshot else { return }
+            self.applySmartBatterySnapshot(snapshot)
+        }
+    }
+
+    nonisolated private static func readSmartBatterySnapshot() -> SmartBatterySnapshot? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        guard service != IO_OBJECT_NULL else { return nil }
         defer { IOObjectRelease(service) }
 
         var propsRef: Unmanaged<CFMutableDictionary>?
         let kr = IORegistryEntryCreateCFProperties(service, &propsRef, kCFAllocatorDefault, 0)
         guard kr == KERN_SUCCESS,
               let props = propsRef?.takeRetainedValue() as? [String: Any]
-        else { return }
+        else { return nil }
 
-        if let cycles = props["CycleCount"] as? Int, cycles >= 0 {
+        var snapshot = SmartBatterySnapshot()
+        snapshot.cycleCount = props["CycleCount"] as? Int
+        snapshot.rawMaxMAh = (props["AppleRawMaxCapacity"] as? Int) ?? (props["NominalChargeCapacity"] as? Int)
+        snapshot.designMAh = props["DesignCapacity"] as? Int
+        snapshot.directHealthPercent = props["MaximumCapacityPercent"] as? Int
+        snapshot.permanentFailure = (props["PermanentFailureStatus"] as? Int ?? 0) != 0
+        snapshot.rawTemperature = props["Temperature"] as? Int
+        snapshot.voltageMV = props["Voltage"] as? Int
+        snapshot.instantAmperageMA = props["InstantAmperage"] as? Int
+        return snapshot
+    }
+
+    private func applySmartBatterySnapshot(_ props: SmartBatterySnapshot) {
+        if let cycles = props.cycleCount, cycles >= 0 {
             setIfChanged(\.cycleCount, to: cycles)
         }
 
-        let rawMax = (props["AppleRawMaxCapacity"] as? Int) ?? (props["NominalChargeCapacity"] as? Int)
-        let design = props["DesignCapacity"] as? Int
+        let rawMax = props.rawMaxMAh
+        let design = props.designMAh
         if let rawMax, rawMax > 200 { setIfChanged(\.maxCapacityMAh, to: rawMax) }
         if let design, design > 200 { setIfChanged(\.designCapacityMAh, to: design) }
 
-        if let directHealth = props["MaximumCapacityPercent"] as? Int, (10...110).contains(directHealth) {
+        if let directHealth = props.directHealthPercent, (10...110).contains(directHealth) {
             setIfChanged(\.healthPercent, to: min(100, directHealth))
         } else if let rawMax, let design, rawMax > 200, design > 200 {
             let pct = Int(round(Double(rawMax) / Double(design) * 100.0))
@@ -303,30 +391,26 @@ final class BatteryMonitor: ObservableObject {
             }
         }
 
-        if let pf = props["PermanentFailureStatus"] as? Int, pf != 0 {
-            setIfChanged(\.conditionText, to: "Service Recommended")
-        } else {
-            setIfChanged(\.conditionText, to: "Normal")
+        setIfChanged(\.conditionText, to: props.permanentFailure ? "Service Recommended" : "Normal")
+
+        if let rawTemp = props.rawTemperature, let celsius = Self.batteryTemperatureCelsius(raw: rawTemp) {
+            setIfChanged(\.temperatureCelsius, to: celsius)
         }
 
-        // Temperature in AppleSmartBattery is reported in centi-Celsius (~3120 -> 31.2°C) or deci-Kelvin (~3045 -> 31.35°C).
-        if let rawTemp = props["Temperature"] as? Int, rawTemp > 0 {
-            let cFromDeciKelvin = Double(rawTemp) / 10.0 - 273.15
-            let cFromCentiCelsius = Double(rawTemp) / 100.0
-            if (5.0...85.0).contains(cFromCentiCelsius) {
-                setIfChanged(\.temperatureCelsius, to: cFromCentiCelsius)
-            } else if (5.0...85.0).contains(cFromDeciKelvin) {
-                setIfChanged(\.temperatureCelsius, to: cFromDeciKelvin)
-            }
-        }
-
-        if !smcProvidesBatteryElectrical, let mv = props["Voltage"] as? Int, mv > 1_000 {
+        if !smcProvidesBatteryElectrical, let mv = props.voltageMV, mv > 1_000 {
             setIfChanged(\.voltageVolts, to: Double(mv) / 1000.0)
-            if let rawAmp = props["InstantAmperage"] as? Int, abs(rawAmp) < 30_000 {
+            if let rawAmp = props.instantAmperageMA, abs(rawAmp) < 30_000 {
                 setIfChanged(\.amperageMA, to: rawAmp)
                 setIfChanged(\.wattage, to: (Double(mv) * Double(rawAmp)) / 1_000_000.0)
             }
         }
+    }
+
+    /// `AppleSmartBattery` `Temperature` is centi-Celsius on Apple Silicon (`3120` -> `31.2 °C`). Values outside a
+    /// plausible battery range are dropped rather than shown.
+    nonisolated static func batteryTemperatureCelsius(raw: Int) -> Double? {
+        let celsius = Double(raw) / 100.0
+        return (5.0...85.0).contains(celsius) ? celsius : nil
     }
 
     // MARK: - Read-Only AppleSMC Power Sensors
@@ -539,7 +623,7 @@ final class BatteryMonitor: ObservableObject {
             }.value
             guard let self, self.energySampleGeneration == generation else { return }
             self.energyAppsTask = nil
-            guard !Task.isCancelled, self.isPopoverVisible, let sample else { return }
+            guard !Task.isCancelled, self.isEnergyAppsPageVisible, let sample else { return }
 
             let (currentCounters, now) = sample
             if let prevTime = self.lastAppSampleTime {

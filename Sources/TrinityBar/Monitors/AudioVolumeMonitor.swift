@@ -72,6 +72,11 @@ final class AudioVolumeMonitor: ObservableObject {
     /// Volume / mute changes on the active output -> lightweight scalar refresh only.
     nonisolated(unsafe) private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var softMutedRestoreVolume: Float?
+    private var coalescedRefreshPending = false
+
+    /// Connecting a headset fires `Devices`, `DefaultOutputDevice` and `DefaultInputDevice` in a burst (often
+    /// several times each); one full device enumeration `150 ms` after the first event covers all of them.
+    nonisolated static let deviceChangeCoalescingDelay: TimeInterval = 0.15
 
     nonisolated private static let systemSelectors: [AudioObjectPropertySelector] = [
         kAudioHardwarePropertyDefaultOutputDevice,
@@ -108,7 +113,7 @@ final class AudioVolumeMonitor: ObservableObject {
     private func observeSystemAudioChanges() {
         let systemBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             MainActor.assumeIsolated {
-                self?.refresh()
+                self?.scheduleCoalescedRefresh()
             }
         }
         let deviceBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
@@ -145,6 +150,18 @@ final class AudioVolumeMonitor: ObservableObject {
         for selector in Self.outputDeviceSelectors {
             var addr = Self.propertyAddress(selector, scope: kAudioDevicePropertyScopeOutput)
             AudioObjectAddPropertyListenerBlock(deviceID, &addr, DispatchQueue.main, block)
+        }
+    }
+
+    private func scheduleCoalescedRefresh() {
+        guard !coalescedRefreshPending else { return }
+        coalescedRefreshPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.deviceChangeCoalescingDelay) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.coalescedRefreshPending = false
+                self.refresh()
+            }
         }
     }
 
