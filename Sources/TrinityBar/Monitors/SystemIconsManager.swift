@@ -2,6 +2,48 @@ import AppKit
 import Foundation
 import os
 
+/// Read/write access to the `com.apple.controlcenter` preference keys TrinityBar manages, injectable so the
+/// hide / snapshot / restore policy can be unit-tested without touching the real menu bar.
+@MainActor
+protocol ControlCenterPreferences: AnyObject {
+    /// `byHost` (current host) integer visibility code for a module key such as `"WiFi"`.
+    func hostInt(forKey key: String) -> Int?
+    func setHostInt(_ value: Int?, forKey key: String)
+    /// Any-host boolean such as `"NSStatusItem Visible WiFi"`.
+    func anyHostBool(forKey key: String) -> Bool?
+    func setAnyHostBool(_ value: Bool?, forKey key: String)
+    func synchronize()
+}
+
+/// Production `ControlCenterPreferences` backed by `CFPreferences`.
+@MainActor
+final class CFControlCenterPreferences: ControlCenterPreferences {
+    private let domain = "com.apple.controlcenter" as CFString
+
+    func hostInt(forKey key: String) -> Int? {
+        (CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? NSNumber)?.intValue
+    }
+
+    func setHostInt(_ value: Int?, forKey key: String) {
+        let cfVal: CFPropertyList? = value.map { NSNumber(value: $0) }
+        CFPreferencesSetValue(key as CFString, cfVal, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+    }
+
+    func anyHostBool(forKey key: String) -> Bool? {
+        (CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? NSNumber)?.boolValue
+    }
+
+    func setAnyHostBool(_ value: Bool?, forKey key: String) {
+        let cfVal: CFPropertyList? = value.map { $0 ? kCFBooleanTrue : kCFBooleanFalse }
+        CFPreferencesSetValue(key as CFString, cfVal, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+    }
+
+    func synchronize() {
+        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+    }
+}
+
 /// Manages hiding and restoring native macOS Control Center menu bar icons (`WiFi`, `Battery`, `Sound`)
 /// while `TrinityBar` is running.
 ///
@@ -53,21 +95,34 @@ final class SystemIconsManager: ObservableObject {
         static let soundForcedVisible = "TrinityBar.soundForcedVisibleByApp"
     }
 
-    private let domain = "com.apple.controlcenter" as CFString
+    private let defaults: UserDefaults
+    private let preferences: ControlCenterPreferences
+    private let restartControlCenterHandler: @MainActor () -> Void
     private var includesVolumeInEmblem: Bool = true
 
     @Published var autoHideEnabled: Bool {
         didSet {
             guard autoHideEnabled != oldValue else { return }
-            UserDefaults.standard.set(autoHideEnabled, forKey: Keys.autoHideEnabledV2)
+            defaults.set(autoHideEnabled, forKey: Keys.autoHideEnabledV2)
             applyCurrentPolicy()
         }
     }
 
     @Published private(set) var isCurrentlyHiddenByApp: Bool
 
-    init() {
-        let ud = UserDefaults.standard
+    /// - Parameters:
+    ///   - defaults: TrinityBar's own store for the opt-in flag and the pre-hide snapshots.
+    ///   - preferences: The Control Center preference keys being hidden / restored.
+    ///   - restartControlCenter: Applies written preferences (production: `killall ControlCenter`).
+    init(
+        defaults: UserDefaults = .standard,
+        preferences: ControlCenterPreferences? = nil,
+        restartControlCenter: (@MainActor () -> Void)? = nil
+    ) {
+        self.defaults = defaults
+        self.preferences = preferences ?? CFControlCenterPreferences()
+        self.restartControlCenterHandler = restartControlCenter ?? SystemIconsManager.killallControlCenter
+        let ud = defaults
         if ud.object(forKey: Keys.autoHideEnabledV2) == nil {
             self.autoHideEnabled = true
             ud.set(true, forKey: Keys.autoHideEnabledV2)
@@ -104,7 +159,7 @@ final class SystemIconsManager: ObservableObject {
 
     /// Applies the desired visibility for `WiFi`, `Battery`, and `Sound` based on `(autoHideEnabled, includesVolumeInEmblem)`.
     func applyCurrentPolicy() {
-        let ud = UserDefaults.standard
+        let ud = defaults
 
         if !autoHideEnabled {
             if isCurrentlyHiddenByApp {
@@ -146,7 +201,7 @@ final class SystemIconsManager: ObservableObject {
     }
 
     func restoreSystemIcons() {
-        let ud = UserDefaults.standard
+        let ud = defaults
         var changed = false
 
         if ud.bool(forKey: Keys.hasSnapshot) {
@@ -171,7 +226,7 @@ final class SystemIconsManager: ObservableObject {
     // MARK: - Forced Native Sound Icon (Hide Native Icons OFF + Volume Bar None)
 
     private var isSoundForcedVisible: Bool {
-        UserDefaults.standard.bool(forKey: Keys.soundForcedVisible)
+        defaults.bool(forKey: Keys.soundForcedVisible)
     }
 
     /// Returns `true` when Control Center preferences were changed.
@@ -179,7 +234,7 @@ final class SystemIconsManager: ObservableObject {
         let item = Self.forcedSoundItem
         if !isSoundForcedVisible {
             captureItemSnapshot(item)
-            UserDefaults.standard.set(true, forKey: Keys.soundForcedVisible)
+            defaults.set(true, forKey: Keys.soundForcedVisible)
         }
         return applyDefaultVisible(item)
     }
@@ -189,14 +244,14 @@ final class SystemIconsManager: ObservableObject {
     private func releaseForcedSoundIfNeeded() -> Bool {
         guard isSoundForcedVisible else { return false }
         let changed = restoreItemSnapshot(Self.forcedSoundItem)
-        UserDefaults.standard.set(false, forKey: Keys.soundForcedVisible)
+        defaults.set(false, forKey: Keys.soundForcedVisible)
         return changed
     }
 
     // MARK: - Snapshot & CFPreferences Helpers
 
     private func captureSnapshotsIfNeeded() {
-        let ud = UserDefaults.standard
+        let ud = defaults
         if !isCurrentlyHiddenByApp || !ud.bool(forKey: Keys.hasSnapshot) {
             for item in Self.managedItems {
                 captureItemSnapshot(item)
@@ -218,7 +273,7 @@ final class SystemIconsManager: ObservableObject {
 
     @discardableResult
     private func restoreItemOrDefault(_ item: ManagedControlCenterItem) -> Bool {
-        let ud = UserDefaults.standard
+        let ud = defaults
         if item.moduleKey == "Sound" && !ud.bool(forKey: Keys.hasSoundSnapshot) {
             return applyDefaultVisible(item)
         } else if ud.bool(forKey: Keys.hasSnapshot) {
@@ -253,48 +308,40 @@ final class SystemIconsManager: ObservableObject {
     }
 
     private func saveByHostSnapshot(key: String, existsKey: String, valKey: String) {
-        let ud = UserDefaults.standard
-        if let raw = CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost),
-           let num = raw as? NSNumber {
-            ud.set(true, forKey: existsKey)
-            ud.set(num.intValue, forKey: valKey)
+        if let value = preferences.hostInt(forKey: key) {
+            defaults.set(true, forKey: existsKey)
+            defaults.set(value, forKey: valKey)
         } else {
-            ud.set(false, forKey: existsKey)
+            defaults.set(false, forKey: existsKey)
         }
     }
 
     private func saveAnyHostSnapshot(key: String, existsKey: String, valKey: String) {
-        let ud = UserDefaults.standard
-        if let raw = CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost),
-           let num = raw as? NSNumber {
-            ud.set(true, forKey: existsKey)
-            ud.set(num.boolValue, forKey: valKey)
+        if let value = preferences.anyHostBool(forKey: key) {
+            defaults.set(true, forKey: existsKey)
+            defaults.set(value, forKey: valKey)
         } else {
-            ud.set(false, forKey: existsKey)
+            defaults.set(false, forKey: existsKey)
         }
     }
 
     @discardableResult
     private func setByHostInt(key: String, value: Int?) -> Bool {
-        let current = (CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? NSNumber)?.intValue
-        guard current != value else { return false }
-        let cfVal: CFPropertyList? = value.map { NSNumber(value: $0) }
-        CFPreferencesSetValue(key as CFString, cfVal, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        guard preferences.hostInt(forKey: key) != value else { return false }
+        preferences.setHostInt(value, forKey: key)
         return true
     }
 
     @discardableResult
     private func setAnyHostBool(key: String, value: Bool?) -> Bool {
-        let current = (CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? NSNumber)?.boolValue
-        guard current != value else { return false }
-        let cfVal: CFPropertyList? = value.map { $0 ? kCFBooleanTrue : kCFBooleanFalse }
-        CFPreferencesSetValue(key as CFString, cfVal, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        guard preferences.anyHostBool(forKey: key) != value else { return false }
+        preferences.setAnyHostBool(value, forKey: key)
         return true
     }
 
     @discardableResult
     private func restoreByHostInt(key: String, existsKey: String, valKey: String) -> Bool {
-        let ud = UserDefaults.standard
+        let ud = defaults
         if ud.bool(forKey: existsKey) {
             return setByHostInt(key: key, value: ud.integer(forKey: valKey))
         } else {
@@ -304,7 +351,7 @@ final class SystemIconsManager: ObservableObject {
 
     @discardableResult
     private func restoreAnyHostBool(key: String, existsKey: String, valKey: String) -> Bool {
-        let ud = UserDefaults.standard
+        let ud = defaults
         if ud.bool(forKey: existsKey) {
             return setAnyHostBool(key: key, value: ud.bool(forKey: valKey))
         } else {
@@ -313,18 +360,21 @@ final class SystemIconsManager: ObservableObject {
     }
 
     private func syncPreferences() {
-        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
-        CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        preferences.synchronize()
     }
 
     private func restartControlCenter() {
+        restartControlCenterHandler()
+    }
+
+    private static func killallControlCenter() {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         proc.arguments = ["ControlCenter"]
         do {
             try proc.run()
         } catch {
-            Self.logger.error("Failed to restart ControlCenter: \(error.localizedDescription, privacy: .public)")
+            logger.error("Failed to restart ControlCenter: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

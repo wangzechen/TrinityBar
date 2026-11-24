@@ -164,6 +164,7 @@ TrinityBar/
     ├── CaffeinateFormatTests.swift          # Keep Awake M:SS / H:MM:SS countdown formatting
     ├── RoutablePublicIPTests.swift          # Latency-probe public vs private / CGNAT / ULA address filter
     ├── StatusFloatingPanelTests.swift       # Scroll-to-volume scaling & panel placement geometry
+    ├── SystemIconsManagerTests.swift        # Native icon hide / snapshot / restore policy against fake prefs
     ├── TrinityStatusIconRendererTests.swift # Menu bar layers for every mode × connection × charging state
     └── WiFiSignalTests.swift                # RSSI -> bars and SF Symbol variable value
 ```
