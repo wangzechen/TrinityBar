@@ -27,9 +27,10 @@ extension TrinityEmblemState {
         network: NetworkMonitor,
         audio: AudioVolumeMonitor,
         settings: AppSettings,
-        isDarkMenuBar: Bool
+        isDarkMenuBar: Bool,
+        showsTransientVolumeFooter: Bool = false
     ) -> TrinityEmblemState {
-        let mode = settings.bottomMode
+        let mode = footerMode(setting: settings.bottomMode, showsTransientVolumeFooter: showsTransientVolumeFooter)
         return TrinityEmblemState(
             hasBattery: battery.hasBattery,
             batteryPercent: battery.percentage,
@@ -44,6 +45,11 @@ extension TrinityEmblemState {
             bottomProgress: mode == .volumeArc ? (audio.effectiveProgress * 50.0).rounded() / 50.0 : 0.0,
             isDarkMenuBar: isDarkMenuBar
         )
+    }
+
+    /// With Volume Bar `None`, a scroll on the emblem briefly shows the dots so the change is visible.
+    nonisolated static func footerMode(setting: BottomIndicatorMode, showsTransientVolumeFooter: Bool) -> BottomIndicatorMode {
+        setting == .none && showsTransientVolumeFooter ? .volumeDots : setting
     }
 }
 

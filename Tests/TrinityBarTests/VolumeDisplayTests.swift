@@ -57,4 +57,11 @@ final class VolumeDisplayTests: XCTestCase {
         XCTAssertEqual(progress(1.4), 1.0)
         XCTAssertEqual(progress(-0.2), 0.0)
     }
+
+    func testTransientFooterOnlyOverridesNone() {
+        XCTAssertEqual(TrinityEmblemState.footerMode(setting: .none, showsTransientVolumeFooter: true), .volumeDots)
+        XCTAssertEqual(TrinityEmblemState.footerMode(setting: .none, showsTransientVolumeFooter: false), BottomIndicatorMode.none)
+        XCTAssertEqual(TrinityEmblemState.footerMode(setting: .volumeArc, showsTransientVolumeFooter: true), .volumeArc)
+        XCTAssertEqual(TrinityEmblemState.footerMode(setting: .volumeDots, showsTransientVolumeFooter: false), .volumeDots)
+    }
 }

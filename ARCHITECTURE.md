@@ -69,6 +69,9 @@ flowchart TD
 3. **Independent `CGPath` Subpaths (Open Top Crown)**:
    - Calling `CGMutablePath.addArc(...)` twice on the same mutable path connects the first arc's endpoint to the second arc's start point with a straight line chord — which would cut across the top `%` number or charging bolt.
    - `TrinityStatusIconRenderer.singleArcPath(...)` constructs each arc segment in its own `CGMutablePath` and merges them via `path.addPath(...)`, keeping the top crown cutout and bottom footer breaks completely open.
+4. **Hover-Scoped Scroll-to-Volume**:
+   - An `NSTrackingArea` (`.mouseEnteredAndExited`, `.activeAlways`, `.inVisibleRect`) on the status button, owned by `StatusItemHoverTracker`, attaches the global + local `.scrollWheel` monitors only while `Icon Volume Control` is on **and** the pointer is over the emblem, and removes them on exit. Scrolling in other apps therefore never wakes TrinityBar (a permanent global monitor fired on every scroll event system-wide). A scroll that lands outside the button also detaches the monitors, as a safety net for a missed `mouseExited`.
+   - With Volume Bar `None`, a scroll on the emblem draws the volume dots for `1.5 s` (`TrinityEmblemState.footerMode(setting:showsTransientVolumeFooter:)`) so the change is visible.
 
 ### 2.2 Zero-Flash Liquid Glass Panel Resize (`StatusFloatingPanel.swift`)
 Animating height changes (`Settings` expand/collapse or `Summary <-> Detail` page navigation) inside an AppKit `NSPanel` hosting SwiftUI encounters a subtle frame-0 timing hazard:

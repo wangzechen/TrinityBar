@@ -8,6 +8,16 @@ private final class UnscaledStatusBarImageView: NSImageView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+/// Receives `mouseEntered` / `mouseExited` for the status button's tracking area, so scroll monitors exist only
+/// while the pointer is over the emblem instead of observing every scroll in every app.
+@MainActor
+private final class StatusItemHoverTracker: NSResponder {
+    var onHoverChange: ((Bool) -> Void)?
+
+    override func mouseEntered(with event: NSEvent) { onHoverChange?(true) }
+    override func mouseExited(with event: NSEvent) { onHoverChange?(false) }
+}
+
 private struct RenderedStatusIconKey: Equatable {
     let emblem: TrinityEmblemState
     let scale: CGFloat
@@ -38,6 +48,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var wakeRefreshTask: Task<Void, Never>?
     private var statusBarLocalScrollMonitor: Any?
     private var statusBarGlobalScrollMonitor: Any?
+    private let hoverTracker = StatusItemHoverTracker()
+    private var isPointerOverStatusItem = false
+    /// Volume Bar `None`: after a scroll on the emblem, briefly draw the volume dots as feedback.
+    private var showsTransientVolumeFooter = false
+    private var transientVolumeFooterTask: Task<Void, Never>?
     private var lastRenderedKey: RenderedStatusIconKey?
     private var lastAccessibilityValue: String?
     private var lastAppearanceName: NSAppearance.Name?
@@ -82,6 +97,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.updateStatusIcon(force: true)
                 }
             }
+
+            hoverTracker.onHoverChange = { [weak self] isOver in
+                self?.isPointerOverStatusItem = isOver
+                self?.syncStatusBarScrollMonitors()
+            }
+            button.addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: hoverTracker,
+                userInfo: nil
+            ))
 
             boundsObservation = button.observe(\.bounds, options: [.new]) { [weak self] _, change in
                 guard let bounds = change.newValue else { return }
@@ -134,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.panel = floatingPanel
 
         systemIcons.setIncludesVolumeInEmblem(settings.bottomMode != .none, applyImmediately: false)
-        syncStatusBarScrollMonitors(enabled: settings.iconVolumeControl)
+        syncStatusBarScrollMonitors()
         observeWorkspaceWake()
         bindStateChanges()
         updateStatusIcon(force: true)
@@ -174,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         wakeRefreshTask?.cancel()
         wakeRefreshTask = nil
+        transientVolumeFooterTask?.cancel()
         removeStatusBarScrollMonitors()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
@@ -197,16 +224,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard settings.iconVolumeControl,
               let rect = statusButtonScreenRect(),
               rect.insetBy(dx: -2, dy: -2).contains(mouseLocation) else {
+            // Safety net for a missed `mouseExited`: stop observing as soon as a scroll lands elsewhere.
+            if isPointerOverStatusItem {
+                isPointerOverStatusItem = false
+                syncStatusBarScrollMonitors()
+            }
             return false
         }
         if let scaled = StatusFloatingPanel.scaledVolumeDelta(dy: dy, isPrecise: isPrecise) {
             audio.adjustVolume(by: Float(scaled))
+            flashVolumeFooterIfHidden()
         }
         return true
     }
 
-    private func syncStatusBarScrollMonitors(enabled: Bool) {
+    private func flashVolumeFooterIfHidden() {
+        guard settings.bottomMode == .none else { return }
+        showsTransientVolumeFooter = true
+        updateStatusIcon(force: false)
+        transientVolumeFooterTask?.cancel()
+        transientVolumeFooterTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled, let self else { return }
+            self.showsTransientVolumeFooter = false
+            self.updateStatusIcon(force: false)
+        }
+    }
+
+    /// Tooltip and help always follow the setting; the scroll monitors themselves are attached only while
+    /// Icon Volume Control is on **and** the pointer is over the emblem, so scrolling elsewhere never wakes TrinityBar.
+    private func syncStatusBarScrollMonitors() {
+        let enabled = settings.iconVolumeControl
         if enabled {
+            statusItem?.button?.toolTip = "TrinityBar — Battery, Network & Sound (Scroll: Volume, ⌥-Click: Mute)"
+            statusItem?.button?.setAccessibilityHelp("Click to open dashboard, scroll to adjust volume, or Option-click to mute.")
+        } else {
+            statusItem?.button?.toolTip = "TrinityBar — Battery, Network & Sound"
+            statusItem?.button?.setAccessibilityHelp("Click to open dashboard.")
+        }
+        if enabled && isPointerOverStatusItem {
             statusItem?.button?.toolTip = "TrinityBar — Battery, Network & Sound (Scroll: Volume, ⌥-Click: Mute)"
             statusItem?.button?.setAccessibilityHelp("Click to open dashboard, scroll to adjust volume, or Option-click to mute.")
             if statusBarGlobalScrollMonitor == nil {
@@ -233,8 +289,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         } else {
-            statusItem?.button?.toolTip = "TrinityBar — Battery, Network & Sound"
-            statusItem?.button?.setAccessibilityHelp("Click to open dashboard.")
             removeStatusBarScrollMonitors()
         }
     }
@@ -332,8 +386,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings.$iconVolumeControl
             .removeDuplicates()
             .dropFirst()
-            .sink { [weak self] enabled in
-                self?.syncStatusBarScrollMonitors(enabled: enabled)
+            .sink { [weak self] _ in
+                // `@Published` fires in willSet; read the new value on the next turn.
+                DispatchQueue.main.async { self?.syncStatusBarScrollMonitors() }
             }
             .store(in: &cancellables)
 
@@ -394,7 +449,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             network: network,
             audio: audio,
             settings: settings,
-            isDarkMenuBar: isButtonDarkAppearance(button)
+            isDarkMenuBar: isButtonDarkAppearance(button),
+            showsTransientVolumeFooter: showsTransientVolumeFooter
         )
 
         let key = RenderedStatusIconKey(emblem: state, scale: scale)
