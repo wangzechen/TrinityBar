@@ -25,7 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let network = NetworkMonitor()
     private let audio = AudioVolumeMonitor()
     private let caffeinate = CaffeinateManager()
-    private let systemIcons = SystemIconsManager()
+    private let systemIcons = SystemIconsManager(
+        // Testing aid: `TRINITYBAR_ASSUME_MACOS_MAJOR=99` exercises the unverified-macOS path on a verified system.
+        macOSMajorVersion: ProcessInfo.processInfo.environment["TRINITYBAR_ASSUME_MACOS_MAJOR"].flatMap(Int.init)
+            ?? ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+    )
 
     private var cancellables = Set<AnyCancellable>()
     private var appearanceObservation: NSKeyValueObservation?

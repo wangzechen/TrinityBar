@@ -16,8 +16,28 @@ private final class FakeControlCenterPreferences: ControlCenterPreferences {
     func hostInt(forKey key: String) -> Int? { host[key] }
     func setHostInt(_ value: Int?, forKey key: String) { host[key] = value }
     func anyHostBool(forKey key: String) -> Bool? { anyHost[key] }
-    func setAnyHostBool(_ value: Bool?, forKey key: String) { anyHost[key] = value }
+    func setAnyHostBool(_ value: Bool?, forKey key: String) {
+        // Simulates macOS refusing to store a key (e.g. a format change after an update).
+        guard !ignoredAnyHostKeys.contains(key) else { return }
+        anyHost[key] = value
+    }
     func synchronize() { synchronizeCount += 1 }
+    var ignoredAnyHostKeys: Set<String> = []
+}
+
+/// Collects deferred work so tests decide when the coalesced ControlCenter restart runs.
+@MainActor
+private final class ManualScheduler {
+    private var work: [@MainActor () -> Void] = []
+    var pendingCount: Int { work.count }
+
+    func schedule(_ item: @escaping @MainActor () -> Void) { work.append(item) }
+
+    func runAll() {
+        let items = work
+        work.removeAll()
+        items.forEach { $0() }
+    }
 }
 
 @MainActor
@@ -54,7 +74,12 @@ final class SystemIconsManagerTests: XCTestCase {
         restarts = nil
     }
 
-    private func makeManager(autoHide: Bool? = nil) -> SystemIconsManager {
+    /// - Parameter scheduler: `nil` runs deferred restarts immediately, so most tests can count restarts synchronously.
+    private func makeManager(
+        autoHide: Bool? = nil,
+        macOSMajor: Int = 26,
+        scheduler: ManualScheduler? = nil
+    ) -> SystemIconsManager {
         if let autoHide {
             defaults.set(autoHide, forKey: "TrinityBar.autoHideSystemIcons.v2")
         }
@@ -62,7 +87,11 @@ final class SystemIconsManagerTests: XCTestCase {
         return SystemIconsManager(
             defaults: defaults,
             preferences: prefs,
-            restartControlCenter: { counter.count += 1 }
+            restartControlCenter: { counter.count += 1 },
+            macOSMajorVersion: macOSMajor,
+            scheduleDeferred: { work in
+                if let scheduler { scheduler.schedule(work) } else { work() }
+            }
         )
     }
 
@@ -261,5 +290,102 @@ final class SystemIconsManagerTests: XCTestCase {
 
         // The snapshot must hold the user's own Sound setting (absent), not TrinityBar's forced 18.
         assertUserLayoutRestored()
+    }
+
+    // MARK: - Coalesced restarts & write verification
+
+    func testRapidPolicyChangesRestartControlCenterOnce() {
+        let scheduler = ManualScheduler()
+        let manager = makeManager(scheduler: scheduler)
+        manager.applyOnLaunchIfNeeded()
+        manager.setIncludesVolumeInEmblem(false)
+        manager.setIncludesVolumeInEmblem(true)
+        manager.setIncludesVolumeInEmblem(false)
+        XCTAssertEqual(restarts.count, 0, "restart must wait for the coalescing delay")
+        XCTAssertEqual(scheduler.pendingCount, 1)
+
+        scheduler.runAll()
+
+        XCTAssertEqual(restarts.count, 1)
+        assertForcedVisible("Sound")
+    }
+
+    func testQuitFlushesPendingRestartImmediately() {
+        let scheduler = ManualScheduler()
+        let manager = makeManager(scheduler: scheduler)
+        manager.applyOnLaunchIfNeeded()
+        XCTAssertEqual(restarts.count, 0)
+
+        manager.restoreOnTerminateIfNeeded()
+
+        XCTAssertEqual(restarts.count, 1, "quit must apply the restore before the process exits")
+        assertUserLayoutRestored()
+        scheduler.runAll()
+        XCTAssertEqual(restarts.count, 1, "the stale deferred restart must not fire again")
+    }
+
+    func testWritesThatDoNotPersistAreReported() {
+        prefs.ignoredAnyHostKeys = ["NSStatusItem Visible WiFi"]
+        let manager = makeManager()
+
+        manager.applyOnLaunchIfNeeded()
+
+        XCTAssertEqual(manager.lastUnverifiedWrites, ["any:NSStatusItem Visible WiFi"])
+    }
+
+    func testPersistedWritesReportNothing() {
+        let manager = makeManager()
+        manager.applyOnLaunchIfNeeded()
+        XCTAssertEqual(manager.lastUnverifiedWrites, [])
+    }
+
+    // MARK: - Unverified macOS versions
+
+    func testVerifiedVersionTable() {
+        XCTAssertTrue(SystemIconsManager.isVerified(macOSMajor: 26))
+        XCTAssertTrue(SystemIconsManager.isVerified(macOSMajor: 27))
+        XCTAssertFalse(SystemIconsManager.isVerified(macOSMajor: 28))
+        XCTAssertTrue(SystemIconsManager.autoHideAllowedAtLaunch(macOSMajor: 28, confirmedMajor: 28))
+        XCTAssertFalse(SystemIconsManager.autoHideAllowedAtLaunch(macOSMajor: 29, confirmedMajor: 28))
+    }
+
+    func testFreshInstallOnUnverifiedMacOSLeavesIconsAlone() {
+        let manager = makeManager(macOSMajor: 99)
+        XCTAssertFalse(manager.isVerifiedOnThisMacOS)
+        XCTAssertFalse(manager.autoHideEnabled)
+
+        manager.applyOnLaunchIfNeeded()
+
+        assertUserLayoutRestored()
+        XCTAssertEqual(restarts.count, 0)
+    }
+
+    func testUpgradeToUnverifiedMacOSWhileHiddenRestoresIcons() {
+        let before = makeManager(macOSMajor: 26)
+        before.applyOnLaunchIfNeeded()
+        assertHidden("WiFi")
+        // Simulated macOS upgrade: the app quits without restoring (e.g. killed during the update), then relaunches.
+
+        let after = makeManager(macOSMajor: 99)
+        XCTAssertFalse(after.autoHideEnabled)
+        after.applyOnLaunchIfNeeded()
+
+        assertUserLayoutRestored()
+        // The stored preference itself is kept, so the choice returns once the version is verified.
+        XCTAssertTrue(defaults.bool(forKey: "TrinityBar.autoHideSystemIcons.v2"))
+    }
+
+    func testOptInOnUnverifiedMacOSIsRememberedForThatVersionOnly() {
+        let manager = makeManager(macOSMajor: 99)
+        manager.autoHideEnabled = true
+        assertHidden("WiFi")
+        manager.restoreOnTerminateIfNeeded()
+
+        let relaunched = makeManager(macOSMajor: 99)
+        XCTAssertTrue(relaunched.autoHideEnabled, "opt-in persists across launches on the same major version")
+        relaunched.restoreOnTerminateIfNeeded()
+
+        let nextMajor = makeManager(macOSMajor: 100)
+        XCTAssertFalse(nextMajor.autoHideEnabled, "a newer unverified major version needs a new opt-in")
     }
 }

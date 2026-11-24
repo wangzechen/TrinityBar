@@ -449,6 +449,13 @@ private struct SettingsDrawerSection<Preview: View>: View {
                 help: "Hide native macOS Wi-Fi, Battery, and Volume icons while TrinityBar is running"
             )
 
+            if !systemIcons.isVerifiedOnThisMacOS {
+                Text("Not yet verified on macOS \(systemIcons.macOSMajorVersion), so it starts off. Turn it on to try it.")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack(spacing: 6) {
                 Text("Launch at Login")
                     .font(.system(size: 11.5))

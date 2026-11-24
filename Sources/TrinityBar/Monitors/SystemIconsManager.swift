@@ -93,17 +93,51 @@ final class SystemIconsManager: ObservableObject {
         static let hasSnapshot = "TrinityBar.hasControlCenterSnapshot"
         static let hasSoundSnapshot = "TrinityBar.hasSoundControlCenterSnapshot"
         static let soundForcedVisible = "TrinityBar.soundForcedVisibleByApp"
+        /// macOS major version on which the user explicitly turned Hide Native Icons on although that
+        /// version isn't in `verifiedMacOSMajorVersions`.
+        static let autoHideConfirmedOSMajor = "TrinityBar.autoHideConfirmedOnUnverifiedMacOSMajor"
     }
+
+    /// macOS major versions on which the undocumented Control Center visibility codes (`24` / `8` / `18`) and
+    /// `NSStatusItem Visible*` keys have been verified by hand. On any other version Hide Native Icons stays
+    /// off until the user turns it on (once per major version), so a changed meaning after a macOS update
+    /// can't scramble their menu bar unasked. Add a version here only after checking hide + restore on it.
+    nonisolated static let verifiedMacOSMajorVersions: Set<Int> = [26, 27]
+
+    nonisolated static func isVerified(macOSMajor: Int) -> Bool {
+        verifiedMacOSMajorVersions.contains(macOSMajor)
+    }
+
+    /// Whether Hide Native Icons may be on at launch: always on verified versions; on an unverified one only
+    /// after the user opted in on that same major version.
+    nonisolated static func autoHideAllowedAtLaunch(macOSMajor: Int, confirmedMajor: Int?) -> Bool {
+        isVerified(macOSMajor: macOSMajor) || confirmedMajor == macOSMajor
+    }
+
+    /// Current macOS major version (e.g. `27`).
+    let macOSMajorVersion: Int
+    /// `false` on a macOS major version not in `verifiedMacOSMajorVersions`; the Settings drawer shows a note.
+    var isVerifiedOnThisMacOS: Bool { Self.isVerified(macOSMajor: macOSMajorVersion) }
 
     private let defaults: UserDefaults
     private let preferences: ControlCenterPreferences
     private let restartControlCenterHandler: @MainActor () -> Void
+    private let scheduleDeferred: @MainActor (@escaping @MainActor () -> Void) -> Void
+    /// Set while a coalesced ControlCenter restart is waiting to run.
+    private var restartPending = false
+    /// Expected values of keys written since the last `syncPreferences()`, re-read after synchronizing.
+    private var pendingWriteChecks: [String: () -> Bool] = [:]
+    /// Keys whose value didn't read back as written after the last sync (logged as faults; exposed for tests).
+    private(set) var lastUnverifiedWrites: [String] = []
     private var includesVolumeInEmblem: Bool = true
 
     @Published var autoHideEnabled: Bool {
         didSet {
             guard autoHideEnabled != oldValue else { return }
             defaults.set(autoHideEnabled, forKey: Keys.autoHideEnabledV2)
+            if autoHideEnabled && !isVerifiedOnThisMacOS {
+                defaults.set(macOSMajorVersion, forKey: Keys.autoHideConfirmedOSMajor)
+            }
             applyCurrentPolicy()
         }
     }
@@ -114,20 +148,34 @@ final class SystemIconsManager: ObservableObject {
     ///   - defaults: TrinityBar's own store for the opt-in flag and the pre-hide snapshots.
     ///   - preferences: The Control Center preference keys being hidden / restored.
     ///   - restartControlCenter: Applies written preferences (production: `killall ControlCenter`).
+    ///   - macOSMajorVersion: Checked against `verifiedMacOSMajorVersions`.
+    ///   - scheduleDeferred: Runs a coalesced restart a moment later (production: `0.3 s` on the main queue).
     init(
         defaults: UserDefaults = .standard,
         preferences: ControlCenterPreferences? = nil,
-        restartControlCenter: (@MainActor () -> Void)? = nil
+        restartControlCenter: (@MainActor () -> Void)? = nil,
+        macOSMajorVersion: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion,
+        scheduleDeferred: (@MainActor (@escaping @MainActor () -> Void) -> Void)? = nil
     ) {
         self.defaults = defaults
         self.preferences = preferences ?? CFControlCenterPreferences()
         self.restartControlCenterHandler = restartControlCenter ?? SystemIconsManager.killallControlCenter
+        self.macOSMajorVersion = macOSMajorVersion
+        self.scheduleDeferred = scheduleDeferred ?? { work in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                MainActor.assumeIsolated { work() }
+            }
+        }
         let ud = defaults
+        let confirmedMajor = ud.object(forKey: Keys.autoHideConfirmedOSMajor) as? Int
+        let allowedAtLaunch = Self.autoHideAllowedAtLaunch(macOSMajor: macOSMajorVersion, confirmedMajor: confirmedMajor)
         if ud.object(forKey: Keys.autoHideEnabledV2) == nil {
-            self.autoHideEnabled = true
-            ud.set(true, forKey: Keys.autoHideEnabledV2)
+            self.autoHideEnabled = allowedAtLaunch
+            ud.set(allowedAtLaunch, forKey: Keys.autoHideEnabledV2)
         } else {
-            self.autoHideEnabled = ud.bool(forKey: Keys.autoHideEnabledV2)
+            // On an unverified macOS the stored preference is kept but not applied until the user opts in again,
+            // so a crash-leftover hidden state is restored by the launch policy.
+            self.autoHideEnabled = ud.bool(forKey: Keys.autoHideEnabledV2) && allowedAtLaunch
         }
         self.isCurrentlyHiddenByApp = ud.bool(forKey: Keys.isCurrentlyHidden)
     }
@@ -167,6 +215,8 @@ final class SystemIconsManager: ObservableObject {
                 restartControlCenter()
             }
         }
+        // Quit, SIGTERM and --restore-native-icons exit right after this: apply now, not after the coalescing delay.
+        flushPendingRestart()
         return hadState
     }
 
@@ -342,6 +392,7 @@ final class SystemIconsManager: ObservableObject {
     private func setByHostInt(key: String, value: Int?) -> Bool {
         guard preferences.hostInt(forKey: key) != value else { return false }
         preferences.setHostInt(value, forKey: key)
+        pendingWriteChecks["host:\(key)"] = { [preferences] in preferences.hostInt(forKey: key) == value }
         return true
     }
 
@@ -349,6 +400,7 @@ final class SystemIconsManager: ObservableObject {
     private func setAnyHostBool(key: String, value: Bool?) -> Bool {
         guard preferences.anyHostBool(forKey: key) != value else { return false }
         preferences.setAnyHostBool(value, forKey: key)
+        pendingWriteChecks["any:\(key)"] = { [preferences] in preferences.anyHostBool(forKey: key) == value }
         return true
     }
 
@@ -372,11 +424,31 @@ final class SystemIconsManager: ObservableObject {
         }
     }
 
+    /// Flushes written keys to `cfprefsd`, then reads each one back. A mismatch means macOS rejected or
+    /// rewrote the value (e.g. a changed preference format after an update); it's logged as a fault.
     private func syncPreferences() {
         preferences.synchronize()
+        let failed = pendingWriteChecks.filter { !$0.value() }.keys.sorted()
+        pendingWriteChecks.removeAll()
+        lastUnverifiedWrites = failed
+        if !failed.isEmpty {
+            Self.logger.fault("Control Center preference writes didn't persist on macOS \(self.macOSMajorVersion, privacy: .public): \(failed.joined(separator: ", "), privacy: .public)")
+        }
     }
 
+    /// Coalesces restarts: several policy changes in quick succession (e.g. flipping Volume Bar modes)
+    /// relaunch ControlCenter once instead of flashing the menu bar each time.
     private func restartControlCenter() {
+        guard !restartPending else { return }
+        restartPending = true
+        scheduleDeferred { [weak self] in
+            self?.flushPendingRestart()
+        }
+    }
+
+    private func flushPendingRestart() {
+        guard restartPending else { return }
+        restartPending = false
         restartControlCenterHandler()
     }
 
@@ -388,6 +460,13 @@ final class SystemIconsManager: ObservableObject {
             try proc.run()
         } catch {
             logger.error("Failed to restart ControlCenter: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        // launchd relaunches ControlCenter on its own; if it hasn't come back, say so in the log.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            if NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.controlcenter").isEmpty {
+                logger.fault("ControlCenter did not relaunch within 3 s after applying icon visibility")
+            }
         }
     }
 }
