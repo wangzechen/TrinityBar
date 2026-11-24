@@ -8,7 +8,7 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-**TrinityBar** is a lightweight (`~676 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and live `Reduce Transparency` fallbacks).
+**TrinityBar** is a lightweight (`~712 KB`), native macOS menu bar utility that unifies **Battery**, **Network**, and **Sound** into a single **`24pt`** status emblem paired with a two-layer **Liquid Glass** dashboard (`NSGlassEffectView` on macOS 26+, with automatic `NSVisualEffectView` and live `Reduce Transparency` fallbacks).
 
 <p align="center">
   <img src="assets/dashboard-summary.png" width="382" valign="top" alt="TrinityBar Summary Dashboard" />
