@@ -66,7 +66,7 @@ git push origin refs/tags/vX.Y.Z
 
 The **Release** workflow checks that the tag matches `version.env`, builds `--release`, and creates a **draft** release with the `.zip` and `.sha256`.
 
-- [ ] The workflow succeeded, and the draft has both assets.
+- [ ] The workflow succeeded (including **Attest build provenance**), and the draft has both assets.
 - [ ] Replace the auto-generated notes with notes in the template below: `gh release edit vX.Y.Z --notes-file notes.md`.
 
 ## 7. Publish (manual)

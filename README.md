@@ -79,6 +79,7 @@ Every module on the primary popover shares a consistent `[Header Row] + [Rounded
    xattr -cr /Applications/TrinityBar.app
    open /Applications/TrinityBar.app
    ```
+4. *(Optional)* Confirm the download was built by this repository's release workflow: `gh attestation verify TrinityBar-v<version>-macos-arm64.zip --repo wangzechen/TrinityBar`.
 
 ### Option 2: Build from Source
 Requires Xcode Command Line Tools (`xcode-select --install`):
@@ -124,7 +125,7 @@ Quitting TrinityBar normally (`Quit TrinityBar`, `⌘Q`, or `SIGTERM`) automatic
 TrinityBar/
 ├── .github/workflows/
 │   ├── ci.yml                               # build_app.sh + check_docs.sh + swift build + swift test on every push/PR
-│   └── release.yml                          # v* tag -> verify version.env -> draft GitHub release
+│   └── release.yml                          # v* tag -> verify version.env -> provenance -> draft release
 ├── LICENSE                                  # MIT License
 ├── Package.swift                            # SwiftPM manifest (macOS 26.0+)
 ├── README.md                                # Product overview, usage & build guide
