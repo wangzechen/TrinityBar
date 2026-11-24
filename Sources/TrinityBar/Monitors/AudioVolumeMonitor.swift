@@ -16,6 +16,12 @@ struct AudioDeviceItem: Identifiable, Equatable, Sendable {
 final class AudioVolumeMonitor: ObservableObject {
     @Published private(set) var volume: Float = 0.5
     @Published private(set) var isMuted: Bool = false
+    /// `false` when the active output has no settable volume (HDMI / DisplayPort audio, Multi-Output aggregate
+    /// devices, some USB DACs): the UI then shows no level and ignores slider / scroll input instead of
+    /// displaying the previous device's stale volume.
+    @Published private(set) var isVolumeControllable: Bool = true
+    /// `false` when the active output supports neither hardware mute nor the volume-based soft mute.
+    @Published private(set) var isMuteControllable: Bool = true
     @Published private(set) var outputDeviceName: String = "Output"
     @Published private(set) var outputTransportLabel: String = "System Output"
     @Published private(set) var outputSymbolName: String = "hifispeaker.fill"
@@ -27,15 +33,37 @@ final class AudioVolumeMonitor: ObservableObject {
     @Published private(set) var defaultInputDeviceName: String?
 
     var effectiveProgress: Double {
-        isMuted ? 0.0 : Double(min(1.0, max(0.0, volume)))
+        Self.effectiveProgress(volume: volume, isMuted: isMuted, isVolumeControllable: isVolumeControllable)
     }
 
     var volumeDots: Int {
-        if isMuted || volume <= 0.01 { return 0 }
+        Self.volumeDots(volume: volume, isMuted: isMuted, isVolumeControllable: isVolumeControllable)
+    }
+
+    /// Short level text for the volume card: `"Muted"`, `"—"` (no volume control), or `"45%"`.
+    var volumeLevelText: String {
+        Self.volumeLevelText(volume: volume, isMuted: isMuted, isVolumeControllable: isVolumeControllable)
+    }
+
+    /// 0...1 fill for the arc footer and the capsule slider; empty when muted or not controllable.
+    nonisolated static func effectiveProgress(volume: Float, isMuted: Bool, isVolumeControllable: Bool) -> Double {
+        guard isVolumeControllable, !isMuted else { return 0.0 }
+        return Double(min(1.0, max(0.0, volume)))
+    }
+
+    /// 0...4 lit dots for the menu bar footer; all dim when muted or not controllable.
+    nonisolated static func volumeDots(volume: Float, isMuted: Bool, isVolumeControllable: Bool) -> Int {
+        if !isVolumeControllable || isMuted || volume <= 0.01 { return 0 }
         if volume < 0.28 { return 1 }
         if volume < 0.53 { return 2 }
         if volume < 0.78 { return 3 }
         return 4
+    }
+
+    nonisolated static func volumeLevelText(volume: Float, isMuted: Bool, isVolumeControllable: Bool) -> String {
+        if isMuted { return "Muted" }
+        guard isVolumeControllable else { return "—" }
+        return "\(Int(round(min(1.0, max(0.0, volume)) * 100)))%"
     }
 
     nonisolated(unsafe) private var observedDeviceID: AudioDeviceID = kAudioObjectUnknown
@@ -202,7 +230,8 @@ final class AudioVolumeMonitor: ObservableObject {
         let currentOutID = deviceID ?? Self.defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice)
         guard currentOutID != kAudioObjectUnknown else { return }
 
-        if let vol: Float32 = Self.readScalar(
+        let volumeSettable = Self.isVolumeSettable(currentOutID)
+        if volumeSettable, let vol: Float32 = Self.readScalar(
             currentOutID,
             selector: kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
             scope: kAudioDevicePropertyScopeOutput,
@@ -213,6 +242,9 @@ final class AudioVolumeMonitor: ObservableObject {
         }
 
         let hardwareMuteSupported = Self.isHardwareMuteSettable(currentOutID)
+        if isVolumeControllable != volumeSettable { isVolumeControllable = volumeSettable }
+        let muteControllable = hardwareMuteSupported || volumeSettable
+        if isMuteControllable != muteControllable { isMuteControllable = muteControllable }
         let newMuted: Bool
         if let muted: UInt32 = Self.readScalar(
             currentOutID,
@@ -255,7 +287,7 @@ final class AudioVolumeMonitor: ObservableObject {
 
     func setVolume(_ newVolume: Float) {
         let deviceID = Self.defaultDevice(selector: kAudioHardwarePropertyDefaultOutputDevice)
-        guard deviceID != kAudioObjectUnknown else { return }
+        guard deviceID != kAudioObjectUnknown, Self.isVolumeSettable(deviceID) else { return }
 
         let clamped = Float32(min(1.0, max(0.0, newVolume)))
         let shouldUnmute = isMuted && clamped > 0.005
@@ -367,6 +399,14 @@ final class AudioVolumeMonitor: ObservableObject {
             guard let base = buf.baseAddress else { return kAudioHardwareUnspecifiedError }
             return AudioObjectSetPropertyData(objectID, &address, 0, nil, size, base)
         } == noErr
+    }
+
+    private static func isVolumeSettable(_ deviceID: AudioDeviceID) -> Bool {
+        var volumeAddr = propertyAddress(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, scope: kAudioDevicePropertyScopeOutput)
+        var settable: DarwinBoolean = false
+        return AudioObjectHasProperty(deviceID, &volumeAddr)
+            && AudioObjectIsPropertySettable(deviceID, &volumeAddr, &settable) == noErr
+            && settable.boolValue
     }
 
     private static func isHardwareMuteSettable(_ deviceID: AudioDeviceID) -> Bool {

@@ -369,7 +369,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .offline: return "Offline"
             }
         }()
-        let volText = audio.isMuted ? "Muted" : "Volume \(Int(round(audio.volume * 100)))%"
+        let volText = audio.isMuted ? "Muted"
+            : (audio.isVolumeControllable ? "Volume \(audio.volumeLevelText)" : "Volume fixed by device")
         let powerText = battery.hasBattery ? "Battery \(battery.percentage)%" : "AC Power"
         return "\(powerText), \(netText), \(volText)"
     }

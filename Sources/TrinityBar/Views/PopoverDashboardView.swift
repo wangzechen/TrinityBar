@@ -330,6 +330,9 @@ private struct SoundSummarySection: View {
         if audio.isMuted {
             return "\(audio.outputTransportLabel) · Muted"
         }
+        if !audio.isVolumeControllable {
+            return "\(audio.outputTransportLabel) · Fixed Volume"
+        }
         if audio.outputDevices.count > 1 {
             return "\(audio.outputTransportLabel) · \(audio.outputDevices.count) outputs"
         }

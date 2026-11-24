@@ -164,7 +164,7 @@ struct SoundInfoBarSection: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var effectiveLevel: Double {
-        audio.isMuted ? 0.0 : Double(min(1.0, max(0.0, audio.volume)))
+        audio.effectiveProgress
     }
 
     var body: some View {
@@ -174,7 +174,7 @@ struct SoundInfoBarSection: View {
             } label: {
                 SummaryGlassMetricCard(
                     symbol: audio.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                    value: audio.isMuted ? "Muted" : "\(Int(round(audio.volume * 100)))%",
+                    value: audio.volumeLevelText,
                     label: audio.isMuted ? "Tap Unmute" : "Volume",
                     tint: audio.isMuted ? .red : .primary,
                     isSilver: !audio.isMuted
@@ -182,7 +182,10 @@ struct SoundInfoBarSection: View {
             }
             .buttonStyle(.plain)
             .frame(width: 94)
-            .help(audio.isMuted ? "Unmute Output" : "Mute Output")
+            .disabled(!audio.isMuteControllable)
+            .help(audio.isMuteControllable
+                ? (audio.isMuted ? "Unmute Output" : "Mute Output")
+                : "This output's volume is controlled by the device")
 
             // Glass Capsule Volume Slider Card
             HStack(spacing: 8) {
@@ -215,6 +218,7 @@ struct SoundInfoBarSection: View {
                     )
                 }
                 .frame(height: 24)
+                .allowsHitTesting(audio.isVolumeControllable)
 
                 Image(systemName: "speaker.wave.3.fill")
                     .font(.system(size: 10.5, weight: .medium))
@@ -227,6 +231,8 @@ struct SoundInfoBarSection: View {
                 fill: Color.accentColor.opacity(0.12),
                 stroke: Color.accentColor.opacity(0.26)
             )
+            .opacity(audio.isVolumeControllable ? 1.0 : 0.45)
+            .help(audio.isVolumeControllable ? "Drag to set the output volume" : "This output's volume is controlled by the device")
         }
     }
 }

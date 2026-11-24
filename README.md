@@ -172,6 +172,7 @@ TrinityBar/
     ├── StatusFloatingPanelTests.swift       # Scroll-to-volume scaling & panel placement geometry
     ├── SystemIconsManagerTests.swift        # Native icon hide / snapshot / restore policy against fake prefs
     ├── TrinityStatusIconRendererTests.swift # Menu bar layers for every mode × connection × charging state
+    ├── VolumeDisplayTests.swift             # Volume dots / arc / % text, muted and fixed-volume outputs
     └── WiFiSignalTests.swift                # RSSI -> bars and SF Symbol variable value
 ```
 
