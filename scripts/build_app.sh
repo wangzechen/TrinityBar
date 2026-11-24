@@ -33,7 +33,7 @@ if (( ${#SWIFT_FILES[@]} == 0 )); then
 fi
 
 echo "Compiling TrinityBar v$VERSION (${#SWIFT_FILES[@]} files, arm64 release, macOS 26+ Liquid Glass target)..."
-swiftc -Osize -whole-module-optimization -parse-as-library \
+swiftc -swift-version 6 -Osize -whole-module-optimization -parse-as-library \
     -strict-concurrency=complete -warnings-as-errors \
     -Xlinker -dead_strip \
     -target arm64-apple-macosx26.0 \
